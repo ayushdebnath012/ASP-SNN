@@ -38,7 +38,7 @@ def make_cfg(**overrides):
 
 def test_classifier():
     """Test ASPClassifier with synthetic data."""
-    print("[1/7] Testing ASPClassifier ... ", end="", flush=True)
+    print("[1/8] Testing ASPClassifier ... ", end="", flush=True)
     from models.asp_classifier import ASPClassifier
 
     cfg = make_cfg(num_classes=15, cls_head_dims=[128, 64],
@@ -71,7 +71,7 @@ def test_classifier():
 
 def test_segmentor_shapenet():
     """Test ASPSegmentor in ShapeNetPart mode."""
-    print("[2/7] Testing ASPSegmentor (ShapeNet) ... ", end="", flush=True)
+    print("[2/8] Testing ASPSegmentor (ShapeNet) ... ", end="", flush=True)
     from models.asp_segmentor import ASPSegmentor
 
     cfg = make_cfg(num_classes=50, num_categories=16,
@@ -100,7 +100,7 @@ def test_segmentor_shapenet():
 
 def test_segmentor_s3dis():
     """Test ASPSegmentor in S3DIS mode (no category, 7-ch input)."""
-    print("[3/7] Testing ASPSegmentor (S3DIS) ... ", end="", flush=True)
+    print("[3/8] Testing ASPSegmentor (S3DIS) ... ", end="", flush=True)
     from models.asp_segmentor import ASPSegmentor
 
     cfg = make_cfg(num_classes=13, num_categories=0,
@@ -129,7 +129,7 @@ def test_segmentor_s3dis():
 
 def test_slicing():
     """Test FPS + KNN slicing pipeline."""
-    print("[4/7] Testing slicing pipeline ... ", end="", flush=True)
+    print("[4/8] Testing slicing pipeline ... ", end="", flush=True)
     from datasets.slicing import slice_point_cloud, assign_points_to_slices
 
     N, C, M, K = 256, 6, 8, 32
@@ -148,7 +148,7 @@ def test_slicing():
 
 def test_early_exit():
     """Verify early exit does not crash and returns valid logits."""
-    print("[5/7] Testing early exit ... ", end="", flush=True)
+    print("[5/8] Testing early exit ... ", end="", flush=True)
     from models.asp_classifier import ASPClassifier
 
     cfg = make_cfg(num_classes=15, exit_threshold=0.0)  # always exit at t=0
@@ -167,7 +167,7 @@ def test_early_exit():
 
 def test_batch_size_1():
     """BatchNorm can break with batch_size=1 in train mode. Verify eval works."""
-    print("[6/7] Testing batch_size=1 eval ... ", end="", flush=True)
+    print("[6/8] Testing batch_size=1 eval ... ", end="", flush=True)
     from models.asp_classifier import ASPClassifier
 
     cfg = make_cfg(num_classes=15)
@@ -182,9 +182,48 @@ def test_batch_size_1():
     print("OK")
 
 
+def test_foveater_asp():
+    """Test FoveaTer ASP image model with synthetic ImageNet-like data."""
+    print("[7/8] Testing FoveaTerASP (ImageNet) ... ", end="", flush=True)
+    from models.foveater_asp import FoveaTerASP
+
+    model = FoveaTerASP(
+        num_classes=10,
+        image_size=64,
+        feature_grid=4,
+        embed_dim=48,
+        depth=1,
+        num_heads=3,
+        max_fixations=2,
+        max_tokens=8,
+    )
+    model.train()
+
+    images = torch.randn(2, 3, 64, 64)
+    labels = torch.randint(0, 10, (2,))
+
+    logits_final, logits_all = model.forward_active_train(
+        images, max_fixations=2, random_initial=True
+    )
+    assert len(logits_all) == 2, f"Expected 2 fixations, got {len(logits_all)}"
+    assert logits_final.shape == (2, 10), f"Wrong shape: {logits_final.shape}"
+    loss = sum(F.cross_entropy(logits, labels) for logits in logits_all)
+    loss.backward()
+
+    model.eval()
+    with torch.no_grad():
+        logits, exit_step, history = model.forward_active_infer(
+            images, threshold=2.0, max_fixations=2, initial_fixation="center"
+        )
+    assert logits.shape == (2, 10), f"Wrong eval shape: {logits.shape}"
+    assert exit_step == 2, f"Expected full 2-fixation eval, got {exit_step}"
+    assert history.shape == (2, 2, 2), f"Wrong fixation history: {history.shape}"
+    print(f"OK  ({len(logits_all)} fixations)")
+
+
 def test_checkpoint_roundtrip():
     """Verify save/load cycle preserves model predictions."""
-    print("[7/7] Testing checkpoint save/load ... ", end="", flush=True)
+    print("[8/8] Testing checkpoint save/load ... ", end="", flush=True)
     import tempfile
     from models.asp_classifier import ASPClassifier
 
@@ -197,14 +236,18 @@ def test_checkpoint_roundtrip():
     with torch.no_grad():
         out1 = model(slices, geo, training=False)[-1]
     with tempfile.NamedTemporaryFile(suffix='.pt', delete=False) as f:
-        torch.save({'model': model.state_dict()}, f.name)
-        ckpt = torch.load(f.name, map_location='cpu', weights_only=False)
+        path = f.name
+    try:
+        torch.save({'model': model.state_dict()}, path)
+        ckpt = torch.load(path, map_location='cpu', weights_only=False)
         model2 = ASPClassifier(cfg)
         model2.load_state_dict(ckpt['model'])
         model2.eval()
         with torch.no_grad():
             out2 = model2(slices, geo, training=False)[-1]
-        os.unlink(f.name)
+    finally:
+        if os.path.exists(path):
+            os.unlink(path)
     assert torch.allclose(out1, out2, atol=1e-5), "Checkpoint round-trip changed predictions"
     print("OK")
 
@@ -222,7 +265,7 @@ def main():
     for test_fn in [test_classifier, test_segmentor_shapenet,
                     test_segmentor_s3dis, test_slicing,
                     test_early_exit, test_batch_size_1,
-                    test_checkpoint_roundtrip]:
+                    test_foveater_asp, test_checkpoint_roundtrip]:
         try:
             test_fn()
             passed += 1

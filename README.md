@@ -81,17 +81,19 @@ ASP-SNN/
 ├── environment.yml                 # Conda environment specification
 ├── requirements.txt                # Pip dependencies
 ├── setup.sh                        # One-command environment setup
-├── smoke_test.py                   # 7-test verification suite (CPU, no data)
+├── smoke_test.py                   # 8-test verification suite (CPU, no data)
 │
 ├── configs/                        # Per-dataset YAML configurations
 │   ├── shapenet_seg.yaml           #   300 epochs, bs=32, pts_per_slice=128
 │   ├── scanobj_cls.yaml            #   300 epochs, bs=32, SO(3) aug, SWA, deep MLP head
+│   ├── imagenet_foveater.yaml      #   FoveaTer ASP on ImageNet/ImageNet-100
 │   └── s3dis_seg.yaml              #   100 epochs, bs=16, RGB+height, class weights
 │
 ├── scripts/                        # SLURM job scripts for GPU cluster
 │   ├── run_shapenet.sh             #   12h wall, 1 GPU, 8 CPUs, 32G
 │   ├── run_scanobj.sh              #   8h wall, 1 GPU, 8 CPUs, 32G
 │   ├── run_s3dis.sh                #   24h wall, 1 GPU, 8 CPUs, 64G
+│   ├── run_imagenet_foveater.sh    #   FoveaTer ASP ImageNet helper
 │   └── smoke_train.sh              #   Quick 2-epoch test for all 3 datasets
 │
 ├── config.py                       # YAML loader with auto type casting + CLI overrides
@@ -102,6 +104,7 @@ ASP-SNN/
 │   ├── shapenetpart.py             # ShapeNetPart HDF5 loader (14,007 train / 2,874 test)
 │   ├── scanobjectnn.py             # ScanObjectNN PB-T50-RS loader (11,416 train / 2,882 test)
 │   ├── s3dis.py                    # S3DIS room-block loader (6 areas, 271 rooms)
+│   ├── imagenet.py                 # ImageFolder loader for ImageNet/ImageNet-100
 │   ├── slicing.py                  # FPS + KNN slicing + 8-dim geometry descriptors
 │   └── transforms.py               # Augmentation: rotation, scale, jitter, color dropout
 │
@@ -111,11 +114,13 @@ ASP-SNN/
 │   ├── ssp.py                      # Slice Selection Policy (attention-based scoring)
 │   ├── lif.py                      # Multi-layer LIF with ATan surrogate (AMP-safe)
 │   ├── asp_classifier.py           # ASP model for classification (ScanObjectNN)
-│   └── asp_segmentor.py            # ASP model for segmentation (ShapeNet + S3DIS)
+│   ├── asp_segmentor.py            # ASP model for segmentation (ShapeNet + S3DIS)
+│   └── foveater_asp.py             # FoveaTer-style image ASP model
 │
 ├── train_shapenet.py               # Train ShapeNetPart (differential LR, category masking)
 ├── train_scanobj.py                # Train ScanObjectNN (SWA, aux loss, label smoothing)
 ├── train_s3dis.py                  # Train S3DIS (class-weighted loss, RGB+height)
+├── train_imagenet_foveater.py      # Train FoveaTer ASP on ImageNet/ImageNet-100
 ├── eval_shapenet.py                # Eval ShapeNetPart (per-category IoU)
 ├── eval_scanobj.py                 # Eval ScanObjectNN (N-vote TTA, per-class accuracy)
 ├── eval_s3dis.py                   # Eval S3DIS (per-class IoU/Acc, mIoU, OA)
@@ -138,7 +143,7 @@ ASP-SNN/
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/ayush31010/ASP-SNN.git
+git clone https://github.com/AryaPawa/ASP-SNN.git
 cd ASP-SNN
 
 # 2. Create conda environment and install all dependencies
@@ -149,7 +154,7 @@ conda activate asp-snn
 
 # 4. Verify installation (CPU only, no data needed, ~30 seconds)
 python smoke_test.py
-# Expected output: ALL 7 TESTS PASSED
+# Expected output: ALL 8 TESTS PASSED
 ```
 
 The smoke test verifies:
@@ -159,7 +164,71 @@ The smoke test verifies:
 4. FPS + KNN slicing pipeline produces correct shapes
 5. Early exit does not crash
 6. Batch size 1 evaluation works (BN edge case)
-7. Checkpoint save/load preserves predictions
+7. FoveaTer ASP image model builds and trains
+8. Checkpoint save/load preserves predictions
+
+---
+
+## FoveaTer ASP on ImageNet
+
+This repo now includes an image-domain ASP model based on the FoveaTer
+architecture. It uses a CNN feature map, fixation-dependent square foveated
+pooling, transformer class-token attention for guided next fixation, inhibition
+of return, average pooling across fixation states, and confidence-based early
+exit.
+
+### Quick synthetic smoke run
+
+This does not need ImageNet and is useful after setup:
+
+```bash
+python train_imagenet_foveater.py \
+  --config configs/imagenet_foveater.yaml \
+  --set smoke=true epochs=1 batch_size=2 image_size=64 feature_grid=4 \
+        embed_dim=48 depth=1 max_fixations=2 max_tokens=8 debug_steps=1 \
+        num_workers=0 use_amp=false num_classes=10
+```
+
+### ImageNet folder layout
+
+Use standard `torchvision.datasets.ImageFolder` layout:
+
+```text
+data/imagenet/
+├── train/
+│   ├── n01440764/
+│   └── ...
+└── val/
+    ├── n01440764/
+    └── ...
+```
+
+ImageNet-100 uses the same layout with 100 class folders.
+
+### Train on ImageNet
+
+```bash
+python train_imagenet_foveater.py \
+  --config configs/imagenet_foveater.yaml \
+  --set data_dir=/path/to/imagenet num_classes=1000 batch_size=128
+```
+
+For ImageNet-100:
+
+```bash
+python train_imagenet_foveater.py \
+  --config configs/imagenet_foveater.yaml \
+  --set data_dir=/path/to/imagenet100 num_classes=100 batch_size=128
+```
+
+You can also use the helper:
+
+```bash
+DATA_DIR=/path/to/imagenet NUM_CLASSES=1000 bash scripts/run_imagenet_foveater.sh
+```
+
+Checkpoints are written to `checkpoints/imagenet_foveater_last.pt` and
+`checkpoints/imagenet_foveater_best.pt`. CSV logs are written under `logs/`.
 
 ---
 

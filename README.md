@@ -15,6 +15,62 @@ separate GPUs via SLURM.
 
 ---
 
+## Foveated ImageNet Quickstart
+
+The foveated transformer extension lives on the
+`codex/foveater-imagenet-asp` branch until it is merged into `main`.
+
+```bash
+git clone https://github.com/AryaPawa/ASP-SNN.git
+cd ASP-SNN
+git fetch origin
+git switch codex/foveater-imagenet-asp
+```
+
+Important files:
+- `models/foveater_asp.py` - FoveaTer-style image ASP model
+- `train_imagenet_foveater.py` - ImageNet/ImageNet-100 training script
+- `configs/imagenet_foveater.yaml` - default training config
+- `datasets/imagenet.py` - ImageFolder dataloader
+- `scripts/run_imagenet_foveater.sh` - shell helper
+
+Smoke test the foveated path without ImageNet:
+
+```bash
+python smoke_test.py
+python train_imagenet_foveater.py \
+  --config configs/imagenet_foveater.yaml \
+  --set smoke=true epochs=1 batch_size=2 image_size=64 feature_grid=4 \
+        embed_dim=48 depth=1 max_fixations=2 max_tokens=8 debug_steps=1 \
+        num_workers=0 use_amp=false num_classes=10
+```
+
+Train on ImageNet:
+
+```bash
+python train_imagenet_foveater.py \
+  --config configs/imagenet_foveater.yaml \
+  --set data_dir=/path/to/imagenet num_classes=1000 batch_size=128
+```
+
+Train on ImageNet-100:
+
+```bash
+python train_imagenet_foveater.py \
+  --config configs/imagenet_foveater.yaml \
+  --set data_dir=/path/to/imagenet100 num_classes=100 batch_size=128
+```
+
+Expected dataset layout is standard `torchvision.datasets.ImageFolder`:
+
+```text
+data/imagenet/
+  train/class_name_or_wnid/*.JPEG
+  val/class_name_or_wnid/*.JPEG
+```
+
+---
+
 ## Architecture
 
 ```

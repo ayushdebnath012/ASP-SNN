@@ -22,7 +22,7 @@ ior_strength: 1.0
 exit_threshold: 0.70
 
 # Training
-epochs: 300
+epochs: 500
 batch_size: 128
 lr: 1e-5
 min_lr: 1e-6

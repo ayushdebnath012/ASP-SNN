@@ -27,7 +27,7 @@ cd ASP-SNN
 Important files:
 - `models/foveater_asp.py` - FoveaTer-style image ASP model
 - `train_imagenet_foveater.py` - ImageNet/ImageNet-100 training script
-- `configs/imagenet_foveater.yaml` - default training config
+- `configs/imagenet_foveater.yaml` - default 500-epoch training config
 - `datasets/imagenet.py` - ImageFolder dataloader
 - `scripts/run_imagenet_foveater.sh` - shell helper
 
@@ -47,7 +47,7 @@ Train on ImageNet:
 ```bash
 python train_imagenet_foveater.py \
   --config configs/imagenet_foveater.yaml \
-  --set data_dir=/path/to/imagenet num_classes=1000 batch_size=128
+  --set data_dir=/path/to/imagenet num_classes=1000 batch_size=128 epochs=500
 ```
 
 Train on ImageNet-100:
@@ -55,7 +55,7 @@ Train on ImageNet-100:
 ```bash
 python train_imagenet_foveater.py \
   --config configs/imagenet_foveater.yaml \
-  --set data_dir=/path/to/imagenet100 num_classes=100 batch_size=128
+  --set data_dir=/path/to/imagenet100 num_classes=100 batch_size=128 epochs=500
 ```
 
 Expected dataset layout is standard `torchvision.datasets.ImageFolder`:
@@ -273,14 +273,14 @@ Train on full ImageNet:
 
 ```bash
 python train_imagenet_foveater.py --config configs/imagenet_foveater.yaml \
-  --set data_dir=/path/to/imagenet num_classes=1000 batch_size=128
+  --set data_dir=/path/to/imagenet num_classes=1000 batch_size=128 epochs=500
 ```
 
 Train on ImageNet-100:
 
 ```bash
 python train_imagenet_foveater.py --config configs/imagenet_foveater.yaml \
-  --set data_dir=/path/to/imagenet100 num_classes=100 batch_size=128
+  --set data_dir=/path/to/imagenet100 num_classes=100 batch_size=128 epochs=500
 ```
 
 ### Parallel GPU Smoke Training
@@ -307,7 +307,7 @@ CUDA_VISIBLE_DEVICES=0 python train_shapenet.py --config configs/shapenet_seg.ya
 CUDA_VISIBLE_DEVICES=1 python train_scanobj.py --config configs/scanobj_cls.yaml &
 CUDA_VISIBLE_DEVICES=2 python train_s3dis.py --config configs/s3dis_seg.yaml &
 CUDA_VISIBLE_DEVICES=3 python train_imagenet_foveater.py --config configs/imagenet_foveater.yaml \
-  --set data_dir=/path/to/imagenet num_classes=1000 &
+  --set data_dir=/path/to/imagenet num_classes=1000 epochs=500 &
 wait
 ```
 
@@ -509,7 +509,7 @@ ImageNet-100 uses the same layout with 100 class folders.
 ```bash
 python train_imagenet_foveater.py \
   --config configs/imagenet_foveater.yaml \
-  --set data_dir=/path/to/imagenet num_classes=1000 batch_size=128
+  --set data_dir=/path/to/imagenet num_classes=1000 batch_size=128 epochs=500
 ```
 
 For ImageNet-100:
@@ -517,13 +517,13 @@ For ImageNet-100:
 ```bash
 python train_imagenet_foveater.py \
   --config configs/imagenet_foveater.yaml \
-  --set data_dir=/path/to/imagenet100 num_classes=100 batch_size=128
+  --set data_dir=/path/to/imagenet100 num_classes=100 batch_size=128 epochs=500
 ```
 
 You can also use the helper:
 
 ```bash
-DATA_DIR=/path/to/imagenet NUM_CLASSES=1000 bash scripts/run_imagenet_foveater.sh
+DATA_DIR=/path/to/imagenet NUM_CLASSES=1000 EPOCHS=500 bash scripts/run_imagenet_foveater.sh
 ```
 
 Checkpoints are written to `checkpoints/imagenet_foveater_last.pt` and

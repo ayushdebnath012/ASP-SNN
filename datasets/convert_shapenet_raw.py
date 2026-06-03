@@ -306,11 +306,11 @@ def convert_shapenet_archive_streaming(archive_path: str, out_dir: str) -> tuple
     """
     Convert a ShapeNetPart ZIP archive directly to HDF5 without extracting to disk.
 
-    Reads each .pts and .seg file from the ZIP in-memory and writes HDF5 chunks,
-    requiring only ~350 MB of free disk space for output (not ~3 GB for extraction).
+    Uses a SINGLE sequential pass through the archive to read all pts/seg data
+    into memory (~200 MB), then writes HDF5 chunks. This avoids the random-seek
+    penalty of reading by name from a large ZIP file.
 
-    Uses a stratified 80/20 train/test split by synset when no official split
-    files are present in the archive.
+    Requires only ~550 MB total (200 MB RAM + 350 MB HDF5 output).
 
     Returns (n_train, n_test) tuple of shapes written.
     """
@@ -325,140 +325,149 @@ def convert_shapenet_archive_streaming(archive_path: str, out_dir: str) -> tuple
     size_mb = os.path.getsize(archive_path) // 1_000_000
     print(f"[ShapeNet] Streaming archive -> HDF5  ({size_mb} MB)")
 
-    with zipfile.ZipFile(archive_path, "r") as zf:
-        # ── Build index ──────────────────────────────────────────────
-        pts_idx = {}   # (synset, stem) → zip_entry_name
-        seg_idx = {}   # (synset, stem) → zip_entry_name
+    # ── Single sequential pass: read all pts + seg data into memory ───────
+    # Sequential reads from a ZIP are fast (100+ MB/s) vs random seeks (50ms each).
+    pts_raw = {}   # (synset, stem) → bytes
+    seg_raw = {}   # (synset, stem) → bytes
 
-        for entry in zf.namelist():
-            norm = entry.replace("\\", "/")
-            parts = norm.split("/")
-            # Find the synset component in the path
-            for i, part in enumerate(parts):
+    print("[ShapeNet] Reading archive (single sequential pass)...", flush=True)
+    with zipfile.ZipFile(archive_path, "r") as zf:
+        total = len(zf.infolist())
+        for i, info in enumerate(zf.infolist()):
+            entry = info.filename
+            if not (entry.endswith(".pts") or entry.endswith(".seg")):
+                continue
+            norm = entry.replace("\\", "/").split("/")
+            for j, part in enumerate(norm):
                 if part not in SYNSET_TO_CAT:
                     continue
-                if i + 1 >= len(parts):
+                if j + 1 >= len(norm):
                     break
-                stem = os.path.splitext(parts[-1])[0]
+                stem = os.path.splitext(norm[-1])[0]
+                key = (part, stem)
+                data = zf.read(entry)
                 if entry.endswith(".pts"):
-                    pts_idx[(part, stem)] = entry
-                elif entry.endswith(".seg"):
-                    seg_idx[(part, stem)] = entry
+                    pts_raw[key] = data
+                else:
+                    seg_raw[key] = data
                 break
+            if (i + 1) % 40000 == 0:
+                print(f"  scanned {i+1}/{total} entries, "
+                      f"pts={len(pts_raw)} seg={len(seg_raw)}", flush=True)
 
-        # Valid pairs need both .pts and .seg
-        pairs = [
-            (synset, stem, pts_idx[(synset, stem)], seg_idx[(synset, stem)])
-            for (synset, stem) in sorted(pts_idx)
-            if (synset, stem) in seg_idx
-        ]
-        print(f"[ShapeNet] {len(pairs)} shapes with both pts + seg")
+    # ── Build valid pairs (have both pts + seg) ───────────────────────────
+    pairs = [
+        (synset, stem, pts_raw[(synset, stem)], seg_raw[(synset, stem)])
+        for (synset, stem) in sorted(pts_raw)
+        if (synset, stem) in seg_raw
+    ]
+    print(f"[ShapeNet] {len(pairs)} shapes with both pts + seg")
 
-        # ── Stratified 80/20 split by synset ─────────────────────────
-        np.random.seed(42)
-        train_pairs, test_pairs = [], []
-        by_synset = {}
-        for p in pairs:
-            by_synset.setdefault(p[0], []).append(p)
+    # ── Stratified 80/20 split by synset ─────────────────────────────────
+    np.random.seed(42)
+    train_pairs, test_pairs = [], []
+    by_synset = {}
+    for p in pairs:
+        by_synset.setdefault(p[0], []).append(p)
 
-        for synset in sorted(by_synset):
-            bucket = by_synset[synset]
-            order = np.random.permutation(len(bucket))
-            n_tr = max(1, int(len(bucket) * 0.8))
-            for k in order[:n_tr]:
-                train_pairs.append(bucket[k])
-            for k in order[n_tr:]:
-                test_pairs.append(bucket[k])
+    for synset in sorted(by_synset):
+        bucket = by_synset[synset]
+        order = np.random.permutation(len(bucket))
+        n_tr = max(1, int(len(bucket) * 0.8))
+        for k in order[:n_tr]:
+            train_pairs.append(bucket[k])
+        for k in order[n_tr:]:
+            test_pairs.append(bucket[k])
 
-        print(f"[ShapeNet] Split: {len(train_pairs)} train / {len(test_pairs)} test")
+    print(f"[ShapeNet] Split: {len(train_pairs)} train / {len(test_pairs)} test")
 
-        # ── Convert helper ────────────────────────────────────────────
-        def _process(split_pairs, prefix):
-            buf_data, buf_label, buf_pid = [], [], []
-            chunk = n_written = n_skip = 0
+    # ── Convert helper (data already in RAM — no I/O bottleneck) ─────────
+    def _process(split_pairs, prefix):
+        buf_data, buf_label, buf_pid = [], [], []
+        chunk = n_written = n_skip = 0
 
-            for i, (synset, stem, pts_entry, seg_entry) in enumerate(split_pairs):
-                try:
-                    # Parse XYZ from .pts (first 3 columns, space-separated)
-                    pts_lines = zf.read(pts_entry).decode("latin-1").splitlines()
-                    rows = []
-                    for ln in pts_lines:
-                        v = ln.split()
-                        if len(v) >= 3:
-                            rows.append((float(v[0]), float(v[1]), float(v[2])))
-                    if not rows:
-                        n_skip += 1
-                        continue
-                    xyz = np.array(rows, dtype=np.float32)
-
-                    # Parse labels from .seg (one integer per line)
-                    seg_lines = zf.read(seg_entry).decode("latin-1").splitlines()
-                    part = np.array(
-                        [int(ln) for ln in seg_lines if ln.strip()],
-                        dtype=np.int64,
-                    )
-
-                    if len(part) != len(xyz):
-                        n_skip += 1
-                        continue
-
-                    xyz_n, part_n = resample(xyz, part, NUM_POINTS_PER_SHAPE)
-                    cat_idx = SYNSET_TO_CAT[synset]
-                    lc = PART_COUNT[cat_idx]
-
-                    if 1 <= int(part_n.min()) and int(part_n.max()) <= lc:
-                        part_g = part_n - 1 + PART_OFFSET[cat_idx]
-                    elif 0 <= int(part_n.min()) and int(part_n.max()) < lc:
-                        part_g = part_n + PART_OFFSET[cat_idx]
-                    elif 0 <= int(part_n.min()) and int(part_n.max()) <= 49:
-                        part_g = part_n
-                    else:
-                        n_skip += 1
-                        continue
-
-                    buf_data.append(xyz_n)
-                    buf_label.append(cat_idx)
-                    buf_pid.append(part_g)
-
-                    if len(buf_data) >= SHAPES_PER_H5:
-                        write_h5_chunk(
-                            out_dir, prefix, chunk,
-                            np.stack(buf_data).astype(np.float32),
-                            np.array(buf_label, np.int64).reshape(-1, 1),
-                            np.stack(buf_pid).astype(np.int64),
-                        )
-                        n_written += len(buf_data)
-                        buf_data, buf_label, buf_pid = [], [], []
-                        chunk += 1
-
-                    if (i + 1) % 2000 == 0:
-                        print(f"  ... {i+1}/{len(split_pairs)}", flush=True)
-
-                except Exception:
+        for i, (synset, stem, pts_bytes, seg_bytes) in enumerate(split_pairs):
+            try:
+                # Parse XYZ from .pts (first 3 columns, space-separated)
+                pts_lines = pts_bytes.decode("latin-1").splitlines()
+                rows = []
+                for ln in pts_lines:
+                    v = ln.split()
+                    if len(v) >= 3:
+                        rows.append((float(v[0]), float(v[1]), float(v[2])))
+                if not rows:
                     n_skip += 1
+                    continue
+                xyz = np.array(rows, dtype=np.float32)
 
-            if buf_data:
-                write_h5_chunk(
-                    out_dir, prefix, chunk,
-                    np.stack(buf_data).astype(np.float32),
-                    np.array(buf_label, np.int64).reshape(-1, 1),
-                    np.stack(buf_pid).astype(np.int64),
+                # Parse labels from .seg (one integer per line)
+                seg_lines = seg_bytes.decode("latin-1").splitlines()
+                part = np.array(
+                    [int(ln) for ln in seg_lines if ln.strip()],
+                    dtype=np.int64,
                 )
-                n_written += len(buf_data)
 
-            if n_skip:
-                print(f"  [warn] {n_skip} shapes skipped")
-            return n_written
+                if len(part) != len(xyz):
+                    n_skip += 1
+                    continue
 
-        # ── Run ───────────────────────────────────────────────────────
-        print("[ShapeNet] Converting train split...")
-        n_tr = _process(train_pairs, "train")
-        print("[ShapeNet] Converting test split...")
-        n_te = _process(test_pairs, "test")
+                xyz_n, part_n = resample(xyz, part, NUM_POINTS_PER_SHAPE)
+                cat_idx = SYNSET_TO_CAT[synset]
+                lc = PART_COUNT[cat_idx]
 
-        write_metadata(out_dir)
-        print(f"[ShapeNet] Streaming done: {n_tr} train + {n_te} test shapes")
-        return n_tr, n_te
+                if 1 <= int(part_n.min()) and int(part_n.max()) <= lc:
+                    part_g = part_n - 1 + PART_OFFSET[cat_idx]
+                elif 0 <= int(part_n.min()) and int(part_n.max()) < lc:
+                    part_g = part_n + PART_OFFSET[cat_idx]
+                elif 0 <= int(part_n.min()) and int(part_n.max()) <= 49:
+                    part_g = part_n
+                else:
+                    n_skip += 1
+                    continue
+
+                buf_data.append(xyz_n)
+                buf_label.append(cat_idx)
+                buf_pid.append(part_g)
+
+                if len(buf_data) >= SHAPES_PER_H5:
+                    write_h5_chunk(
+                        out_dir, prefix, chunk,
+                        np.stack(buf_data).astype(np.float32),
+                        np.array(buf_label, np.int64).reshape(-1, 1),
+                        np.stack(buf_pid).astype(np.int64),
+                    )
+                    n_written += len(buf_data)
+                    buf_data, buf_label, buf_pid = [], [], []
+                    chunk += 1
+
+                if (i + 1) % 2000 == 0:
+                    print(f"  ... {i+1}/{len(split_pairs)}", flush=True)
+
+            except Exception:
+                n_skip += 1
+
+        if buf_data:
+            write_h5_chunk(
+                out_dir, prefix, chunk,
+                np.stack(buf_data).astype(np.float32),
+                np.array(buf_label, np.int64).reshape(-1, 1),
+                np.stack(buf_pid).astype(np.int64),
+            )
+            n_written += len(buf_data)
+
+        if n_skip:
+            print(f"  [warn] {n_skip} shapes skipped")
+        return n_written
+
+    # ── Run ───────────────────────────────────────────────────────────
+    print("[ShapeNet] Converting train split...")
+    n_tr = _process(train_pairs, "train")
+    print("[ShapeNet] Converting test split...")
+    n_te = _process(test_pairs, "test")
+
+    write_metadata(out_dir)
+    print(f"[ShapeNet] Streaming done: {n_tr} train + {n_te} test shapes")
+    return n_tr, n_te
 
 
 def main():

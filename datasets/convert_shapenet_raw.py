@@ -69,9 +69,33 @@ PART_OFFSET = {
     0: 0,   1: 4,   2: 6,   3: 8,   4: 12,  5: 16,  6: 19,  7: 22,
     8: 24,  9: 28,  10: 30, 11: 36, 12: 38, 13: 41, 14: 44, 15: 46,
 }
+PART_COUNT = {
+    0: 4,   1: 2,   2: 2,   3: 4,   4: 4,   5: 3,   6: 3,   7: 2,
+    8: 4,   9: 2,   10: 6,  11: 2,  12: 3,  13: 3,  14: 2,  15: 3,
+}
 
 NUM_POINTS_PER_SHAPE = 2048
 SHAPES_PER_H5 = 2048  # how many shapes per output h5 file
+
+
+def find_label_file(pts_path: str):
+    """Locate separate PartAnnotation labels for a points file."""
+    stem = os.path.splitext(os.path.basename(pts_path))[0]
+    points_dir = os.path.dirname(pts_path)
+    synset_dir = (
+        os.path.dirname(points_dir)
+        if os.path.basename(points_dir) == "points"
+        else points_dir
+    )
+    candidates = []
+    for label_dir_name in ("points_label", "labels", "seg", "segmentation"):
+        label_dir = os.path.join(synset_dir, label_dir_name)
+        for ext in (".seg", ".txt", ".pts"):
+            candidates.append(os.path.join(label_dir, f"{stem}{ext}"))
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return None
 
 
 def load_shape(pts_path: str) -> tuple:
@@ -85,7 +109,20 @@ def load_shape(pts_path: str) -> tuple:
     data = np.loadtxt(pts_path).astype(np.float32)
     if data.ndim == 1:
         data = data.reshape(1, -1)
-    if data.shape[1] == 4:
+    if data.shape[1] == 3:
+        label_path = find_label_file(pts_path)
+        if label_path is None:
+            raise ValueError(f"No separate label file found for {pts_path}")
+        part = np.loadtxt(label_path).astype(np.int64)
+        if part.ndim > 1:
+            part = part.reshape(-1)
+        xyz = data[:, :3]
+        if len(part) != len(xyz):
+            raise ValueError(
+                f"Point/label count mismatch for {pts_path}: "
+                f"{len(xyz)} points vs {len(part)} labels"
+            )
+    elif data.shape[1] == 4:
         xyz, part = data[:, :3], data[:, 3]
     elif data.shape[1] >= 7:
         xyz, part = data[:, :3], data[:, -1]
@@ -111,22 +148,43 @@ def load_split_list(raw_dir: str, split: str) -> list:
         return []
     with open(path) as f:
         items = json.load(f)
-    # Items look like "shape_data/02691156/abcd1234"
+    # Items can look like "shape_data/02691156/abcd1234" or include
+    # "points/abcd1234.pts" depending on the mirror.
     parsed = []
     for item in items:
-        item = item.replace("shape_data/", "").strip()
-        if "/" not in item:
+        parsed_item = normalise_split_item(item)
+        if parsed_item is None:
             continue
-        synset, name = item.split("/", 1)
-        if synset not in SYNSET_TO_CAT:
-            continue
-        parsed.append((synset, name))
+        parsed.append(parsed_item)
     return parsed
+
+
+def normalise_split_item(item: str):
+    parts = item.replace("\\", "/").strip().split("/")
+    for i, part in enumerate(parts):
+        if part not in SYNSET_TO_CAT:
+            continue
+        tail = parts[i + 1:]
+        if not tail:
+            return None
+        if "points" in tail:
+            pidx = tail.index("points")
+            if pidx + 1 >= len(tail):
+                return None
+            name = tail[pidx + 1]
+        else:
+            name = tail[-1]
+        return part, os.path.splitext(name)[0]
+    return None
 
 
 def find_pts_file(raw_dir: str, synset: str, name: str) -> str:
     """Locate the .pts/.txt file for a given shape."""
     candidates = [
+        os.path.join(raw_dir, synset, "expert_verified", "points", f"{name}.pts"),
+        os.path.join(raw_dir, synset, "expert_verified", "points", f"{name}.txt"),
+        os.path.join(raw_dir, synset, "expert_verified", f"{name}.pts"),
+        os.path.join(raw_dir, synset, "expert_verified", f"{name}.txt"),
         os.path.join(raw_dir, synset, "points", f"{name}.pts"),
         os.path.join(raw_dir, synset, "points", f"{name}.txt"),
         os.path.join(raw_dir, synset, f"{name}.pts"),
@@ -136,6 +194,19 @@ def find_pts_file(raw_dir: str, synset: str, name: str) -> str:
         if os.path.exists(c):
             return c
     return None
+
+
+def next_h5_index(out_dir: str, prefix: str) -> int:
+    if not os.path.isdir(out_dir):
+        return 0
+    next_idx = 0
+    for fname in os.listdir(out_dir):
+        if not (fname.startswith(prefix) and fname.endswith(".h5")):
+            continue
+        idx_text = fname[len(prefix):-3]
+        if idx_text.isdigit():
+            next_idx = max(next_idx, int(idx_text) + 1)
+    return next_idx
 
 
 def write_h5_chunk(out_dir: str, prefix: str, idx: int,
@@ -160,7 +231,7 @@ def convert_split(raw_dir: str, out_dir: str, split: str, prefix: str):
     np.random.seed(0)  # deterministic resampling
 
     data_buf, label_buf, pid_buf = [], [], []
-    chunk_idx = 0
+    chunk_idx = next_h5_index(out_dir, prefix)
     n_written = 0
 
     for i, (synset, name) in enumerate(pairs):
@@ -179,9 +250,13 @@ def convert_split(raw_dir: str, out_dir: str, split: str, prefix: str):
         cat_idx = SYNSET_TO_CAT[synset]
 
         # Make part labels GLOBAL (0..49) if the raw labels are 1-indexed local
-        if part_n.min() >= 1 and part_n.max() <= 6:
+        local_count = PART_COUNT[cat_idx]
+        if part_n.min() >= 1 and part_n.max() <= local_count:
             # Local 1-indexed labels — shift to global
             part_global = part_n - 1 + PART_OFFSET[cat_idx]
+        elif part_n.min() >= 0 and part_n.max() < local_count:
+            # Local 0-indexed labels: shift to global.
+            part_global = part_n + PART_OFFSET[cat_idx]
         elif part_n.min() >= 0 and part_n.max() <= 49:
             # Already global
             part_global = part_n

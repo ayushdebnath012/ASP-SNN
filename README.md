@@ -171,20 +171,19 @@ Download ShapeNetPart:
 python datasets/download.py --shapenet
 ```
 
-If the Stanford link is slow/down, a Kaggle mirror is fine only if it contains
-the same HDF5 layout (`train*.h5`, `test*.h5`, with `data`, `label`, `pid`
-keys). Prepare a downloaded Kaggle zip/folder like this:
+If the Stanford link is slow/down, use the Kaggle dataset
+`majdouline20/shapenetpart-dataset`. That Kaggle copy is the raw
+`PartAnnotation` layout, so the downloader converts it to the HDF5 format
+expected by `train_shapenet.py`:
 
 ```bash
-python datasets/download.py --shapenet_local /path/to/kaggle/shapenetpart.zip
+python datasets/download.py --shapenet_kaggle
 ```
 
-For the Kaggle dataset `majdouline20/shapenetpart-dataset`, use this shell
-script. That Kaggle copy is the raw `PartAnnotation` layout, so the script
-downloads it and converts it to the HDF5 format expected by `train_shapenet.py`:
+If the Kaggle data is already downloaded/extracted:
 
 ```bash
-bash scripts/prepare_shapenet_kaggle.sh
+python datasets/download.py --shapenet_raw /path/to/PartAnnotation_or_parent_folder
 ```
 
 Quick 2-epoch smoke training:
@@ -574,25 +573,23 @@ python datasets/download.py --scanobj     # ~50 MB from HuggingFace
 python datasets/download.py --s3dis       # ~15.5 GB via gdown/OpenPoints
 ```
 
-ShapeNetPart Kaggle mirrors are acceptable if they contain the Stanford HDF5
-files:
+For the Kaggle ShapeNetPart dataset:
 
 ```bash
-python datasets/download.py --shapenet_local /path/to/kaggle/shapenetpart.zip
+python datasets/download.py --shapenet_kaggle
 ```
 
 The specific Kaggle dataset `majdouline20/shapenetpart-dataset` is a raw
-`PartAnnotation` tree, not the same HDF5 file layout as Stanford. Use:
+`PartAnnotation` tree, not the same HDF5 file layout as Stanford. The command
+above downloads and converts it. If already downloaded/extracted:
 
 ```bash
-bash scripts/prepare_shapenet_kaggle.sh
-# or, if already downloaded/extracted:
 python datasets/download.py --shapenet_raw /path/to/PartAnnotation_or_parent_folder
 ```
 
 | Dataset | Source | Auth required? | Auto-download? |
 |---|---|---|---|
-| ShapeNetPart | `shapenet.cs.stanford.edu` | No | Yes |
+| ShapeNetPart | Stanford direct, then Kaggle `majdouline20/shapenetpart-dataset` | Kaggle may need API credentials | Yes |
 | ScanObjectNN | `huggingface.co/datasets/cminst/ScanObjectNN` | No | Yes |
 | S3DIS | Google Drive (OpenPoints preprocessed) | No | Yes (via gdown) |
 

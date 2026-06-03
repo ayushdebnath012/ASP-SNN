@@ -6,3 +6,5 @@ scipy>=1.10
 scikit-learn>=1.2
 huggingface_hub>=0.20
 gdown>=5.0
+kagglehub>=0.3.0
+kaggle>=1.6

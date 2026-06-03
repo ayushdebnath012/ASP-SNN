@@ -2,7 +2,7 @@
 datasets/download.py — Download and prepare all three datasets.
 
 Download methods per dataset:
-    ShapeNetPart  : Direct wget from Stanford (no auth needed)
+    ShapeNetPart  : Stanford -> Google Drive -> Kaggle PartAnnotation
     ScanObjectNN  : HuggingFace mirror (no form needed) → gdown fallback
     S3DIS         : gdown from Google Drive (OpenPoints preprocessed) → manual fallback
 
@@ -18,10 +18,12 @@ Usage:
 
 import argparse
 import os
+import shutil
+import subprocess
 import sys
-import zipfile
 import tarfile
 import urllib.request
+import zipfile
 
 DATA_ROOT = "data"
 
@@ -33,6 +35,10 @@ DATA_ROOT = "data"
 SHAPENET_URL = "https://shapenet.cs.stanford.edu/media/shapenet_part_seg_hdf5_data.zip"
 # Public Google Drive mirror (used by PointNeXt and others)
 SHAPENET_GDRIVE_ID = "1tEnSGAdgfp-NPVS5y_ALD8eF18bzwhM_"
+SHAPENET_KAGGLE_SLUG = "majdouline20/shapenetpart-dataset"
+SHAPENET_KAGGLE_URL = (
+    "https://www.kaggle.com/datasets/majdouline20/shapenetpart-dataset"
+)
 SHAPENET_DIR = "shapenet_part_seg_hdf5_data"
 
 
@@ -42,7 +48,8 @@ def download_shapenet():
     Tries in order:
       1. Stanford direct URL
       2. Google Drive mirror via gdown
-      3. Manual instructions (incl. Kaggle raw + conversion)
+      3. Kaggle raw PartAnnotation download + conversion
+      4. Manual instructions
     """
     out_dir = os.path.join(DATA_ROOT, SHAPENET_DIR)
     sentinel = os.path.join(out_dir, "all_object_categories.txt")
@@ -91,20 +98,28 @@ def download_shapenet():
             os.remove(zip_path)
 
     # ── Method 3: Manual instructions ──────────────────────────────────
+    print(f"[ShapeNet] Trying Kaggle dataset ({SHAPENET_KAGGLE_SLUG}) ...")
+    try:
+        if download_shapenet_kaggle():
+            return True
+    except Exception as e:
+        print(f"[ShapeNet] Kaggle failed: {e}")
+
     print()
     print("=" * 60)
     print("  ShapeNetPart auto-download failed from all sources")
     print("=" * 60)
     print()
     print("  Option A: Download from Kaggle and convert to HDF5")
-    print("    1. Install Kaggle CLI:    pip install kaggle")
-    print("    2. Set up API key:        https://www.kaggle.com/docs/api")
-    print("    3. Download (any of these works):")
-    print("       kaggle datasets download -d mitkir/shapenet -p data/")
-    print("    4. Extract the .zip into data/shapenetcore_partanno_*/")
-    print("    5. Convert to HDF5:")
+    print("    1. Install dependencies:  pip install kagglehub kaggle")
+    print("    2. If needed, set up Kaggle API credentials:")
+    print("       https://www.kaggle.com/docs/api")
+    print(f"    3. Dataset: {SHAPENET_KAGGLE_URL}")
+    print("    4. Re-run:")
+    print("       python datasets/download.py --shapenet_kaggle")
+    print("    5. Or convert an already extracted raw folder:")
     print("       python datasets/convert_shapenet_raw.py \\")
-    print("           --raw_dir data/shapenetcore_partanno_segmentation_benchmark_v0_normal \\")
+    print("           --raw_dir data/PartAnnotation \\")
     print("           --out_dir data/shapenet_part_seg_hdf5_data")
     print()
     print("  Option B: Manual Stanford download")
@@ -113,6 +128,159 @@ def download_shapenet():
     print(f"    3. Re-run: python datasets/download.py --shapenet")
     print()
     return False
+
+
+def download_shapenet_kaggle():
+    """
+    Download the Kaggle ShapeNetPart PartAnnotation dataset and convert it.
+
+    The preferred path uses kagglehub. If kagglehub is unavailable or cannot
+    access the dataset, this falls back to the official Kaggle CLI.
+    """
+    out_dir = os.path.join(DATA_ROOT, SHAPENET_DIR)
+    sentinel = os.path.join(out_dir, "all_object_categories.txt")
+    if os.path.exists(sentinel):
+        print(f"[ShapeNet] Already present at {out_dir}")
+        return True
+
+    os.makedirs(DATA_ROOT, exist_ok=True)
+    download_root = os.path.join(DATA_ROOT, "_kaggle_shapenetpart")
+    os.makedirs(download_root, exist_ok=True)
+
+    raw_dir = None
+    try:
+        import kagglehub
+        print("[ShapeNet] Downloading Kaggle dataset with kagglehub ...")
+        kaggle_path = kagglehub.dataset_download(SHAPENET_KAGGLE_SLUG)
+        raw_dir = _find_shapenet_raw_dir(kaggle_path)
+        if raw_dir is None:
+            print(f"[ShapeNet] Could not find PartAnnotation under {kaggle_path}")
+    except ImportError:
+        print("[ShapeNet] kagglehub not installed (pip install kagglehub)")
+    except Exception as e:
+        print(f"[ShapeNet] kagglehub failed: {e}")
+
+    if raw_dir is None:
+        raw_dir = _download_shapenet_with_kaggle_cli(download_root)
+
+    if raw_dir is None:
+        print("[ShapeNet] Kaggle download did not produce a raw PartAnnotation folder.")
+        return False
+
+    return prepare_shapenet_raw(raw_dir)
+
+
+def _download_shapenet_with_kaggle_cli(download_root: str):
+    """Download the Kaggle dataset with the official Kaggle CLI."""
+    print("[ShapeNet] Trying Kaggle CLI ...")
+    kaggle_cmd = _kaggle_cli_command()
+    if kaggle_cmd is None:
+        print("[ShapeNet] kaggle CLI not found (pip install kaggle)")
+        return None
+
+    cmd = kaggle_cmd + [
+        "datasets",
+        "download",
+        "-d",
+        SHAPENET_KAGGLE_SLUG,
+        "-p",
+        download_root,
+        "--unzip",
+    ]
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError as e:
+        print(f"[ShapeNet] Kaggle CLI failed with exit code {e.returncode}")
+        return None
+
+    return _find_shapenet_raw_dir(download_root)
+
+
+def _kaggle_cli_command():
+    """Return a command prefix for the Kaggle CLI, including Windows user scripts."""
+    for name in ("kaggle", "kaggle.exe"):
+        exe = shutil.which(name)
+        if exe:
+            return [exe]
+
+    candidates = []
+    if os.name == "nt":
+        candidates.append(
+            os.path.join(
+                os.path.expanduser("~"),
+                "AppData",
+                "Roaming",
+                "Python",
+                f"Python{sys.version_info.major}{sys.version_info.minor}",
+                "Scripts",
+                "kaggle.exe",
+            )
+        )
+        candidates.append(
+            os.path.join(os.path.dirname(sys.executable), "Scripts", "kaggle.exe")
+        )
+
+    for exe in candidates:
+        if os.path.exists(exe):
+            return [exe]
+    return None
+
+
+def prepare_shapenet_raw(raw_dir: str):
+    """Convert an extracted ShapeNetPart PartAnnotation folder to HDF5."""
+    raw_dir = _find_shapenet_raw_dir(raw_dir)
+    if raw_dir is None:
+        print("[ShapeNet] Could not find raw ShapeNetPart PartAnnotation files.")
+        return False
+
+    out_dir = os.path.join(DATA_ROOT, SHAPENET_DIR)
+    sentinel = os.path.join(out_dir, "all_object_categories.txt")
+    print(f"[ShapeNet] Converting raw PartAnnotation from {raw_dir}")
+
+    try:
+        from datasets.convert_shapenet_raw import convert_split, write_metadata
+    except Exception:
+        from convert_shapenet_raw import convert_split, write_metadata
+
+    if os.path.isdir(out_dir):
+        shutil.rmtree(out_dir)
+    os.makedirs(out_dir, exist_ok=True)
+
+    n_train = convert_split(raw_dir, out_dir, "train", "train")
+    n_val = convert_split(raw_dir, out_dir, "val", "train")
+    n_test = convert_split(raw_dir, out_dir, "test", "test")
+    write_metadata(out_dir)
+
+    if os.path.exists(sentinel) and n_train + n_val > 0 and n_test > 0:
+        print(
+            f"[ShapeNet] Ready at {out_dir}: "
+            f"{n_train + n_val} train/val + {n_test} test shapes"
+        )
+        return True
+
+    print("[ShapeNet] Conversion finished but no usable train/test H5 files were written.")
+    return False
+
+
+def _find_shapenet_raw_dir(root: str):
+    """Find a raw ShapeNetPart folder containing synset dirs and split JSONs."""
+    if not root or not os.path.exists(root):
+        return None
+
+    expected_synsets = {
+        "02691156", "02773838", "02954340", "02958343",
+        "03001627", "03261776", "03467517", "03624134",
+        "03636649", "03642806", "03790512", "03797390",
+        "03948459", "04099429", "04225987", "04379243",
+    }
+    for cur, dirs, files in os.walk(root):
+        has_splits = "train_test_split" in dirs
+        synset_hits = len(expected_synsets.intersection(dirs))
+        if has_splits and synset_hits >= 8:
+            return cur
+        if "synsetoffset2category.txt" in files and synset_hits >= 8:
+            return cur
+    return None
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -428,6 +596,8 @@ def main():
 Examples:
     python datasets/download.py --all
     python datasets/download.py --scanobj
+    python datasets/download.py --shapenet_kaggle
+    python datasets/download.py --shapenet_raw /data/PartAnnotation
     python datasets/download.py --s3dis_preprocess /data/Stanford3dDataset_v1.2_Aligned_Version
         """,
     )
@@ -435,6 +605,10 @@ Examples:
                    help="Download all three datasets")
     p.add_argument("--shapenet", action="store_true",
                    help="Download ShapeNetPart HDF5")
+    p.add_argument("--shapenet_kaggle", action="store_true",
+                   help="Download ShapeNetPart from Kaggle and convert to HDF5")
+    p.add_argument("--shapenet_raw", type=str, default=None,
+                   help="Convert local raw ShapeNetPart PartAnnotation to HDF5")
     p.add_argument("--scanobj", action="store_true",
                    help="Download ScanObjectNN PB_T50_RS")
     p.add_argument("--s3dis", action="store_true",
@@ -448,10 +622,23 @@ Examples:
         preprocess_s3dis_raw(args.s3dis_preprocess)
         return
 
+    if args.shapenet_raw:
+        ok = prepare_shapenet_raw(args.shapenet_raw)
+        print()
+        print("=" * 60)
+        print("  Download Summary")
+        print("=" * 60)
+        print(f"  {'ShapeNetPart':<15} {'READY' if ok else 'NEEDS ATTENTION'}")
+        print("=" * 60)
+        return
+
     results = {}
 
     if args.all or args.shapenet:
         results['ShapeNetPart'] = download_shapenet()
+
+    if args.shapenet_kaggle:
+        results['ShapeNetPart'] = download_shapenet_kaggle()
 
     if args.all or args.scanobj:
         results['ScanObjectNN'] = download_scanobjectnn()
@@ -459,7 +646,13 @@ Examples:
     if args.all or args.s3dis:
         results['S3DIS'] = download_s3dis()
 
-    if not any([args.all, args.shapenet, args.scanobj, args.s3dis]):
+    if not any([
+        args.all,
+        args.shapenet,
+        args.shapenet_kaggle,
+        args.scanobj,
+        args.s3dis,
+    ]):
         p.print_help()
         return
 

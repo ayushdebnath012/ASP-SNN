@@ -18,6 +18,7 @@ Usage:
 
 import argparse
 import os
+import shutil
 import sys
 import zipfile
 import tarfile
@@ -69,6 +70,74 @@ def download_shapenet():
     n_test = len(glob.glob(os.path.join(out_dir, "test*.h5")))
     print(f"[ShapeNet] Done: {n_train} train + {n_test} test H5 files")
     return True
+
+
+def _find_shapenet_h5_dir(root: str):
+    """Find a directory containing ShapeNetPart HDF5 train/test files."""
+    for cur, _, files in os.walk(root):
+        has_train = any(f.startswith("train") and f.endswith(".h5") for f in files)
+        has_test = any(f.startswith("test") and f.endswith(".h5") for f in files)
+        if has_train and has_test:
+            return cur
+    return None
+
+
+def _extract_archive(archive_path: str, dest_dir: str):
+    """Extract zip/tar archives even when the extension is misleading."""
+    os.makedirs(dest_dir, exist_ok=True)
+    if zipfile.is_zipfile(archive_path):
+        with zipfile.ZipFile(archive_path, "r") as zf:
+            zf.extractall(dest_dir)
+        return True
+    if tarfile.is_tarfile(archive_path):
+        with tarfile.open(archive_path, "r:*") as tf:
+            tf.extractall(dest_dir)
+        return True
+    try:
+        shutil.unpack_archive(archive_path, dest_dir)
+        return True
+    except Exception:
+        return False
+
+
+def prepare_shapenet_local(src_path: str):
+    """
+    Prepare a local/Kaggle ShapeNetPart download.
+
+    This is valid when the extracted data contains the Stanford-style HDF5
+    files: train*.h5, test*.h5, data/label/pid keys.
+    """
+    if not os.path.exists(src_path):
+        print(f"[ShapeNet] Local path not found: {src_path}")
+        return False
+
+    os.makedirs(DATA_ROOT, exist_ok=True)
+    target = os.path.join(DATA_ROOT, SHAPENET_DIR)
+
+    search_root = src_path
+    if os.path.isfile(src_path):
+        extract_root = os.path.join(DATA_ROOT, "_shapenet_local_extract")
+        print(f"[ShapeNet] Extracting local archive: {src_path}")
+        if not _extract_archive(src_path, extract_root):
+            print("[ShapeNet] Could not extract local archive.")
+            return False
+        search_root = extract_root
+
+    h5_dir = _find_shapenet_h5_dir(search_root)
+    if h5_dir is None:
+        print("[ShapeNet] Could not find train*.h5 and test*.h5 files.")
+        print("[ShapeNet] Kaggle is OK only if it contains the HDF5 ShapeNetPart format.")
+        return False
+
+    if os.path.abspath(h5_dir) != os.path.abspath(target):
+        print(f"[ShapeNet] Copying HDF5 files from {h5_dir} -> {target}")
+        shutil.copytree(h5_dir, target, dirs_exist_ok=True)
+
+    import glob
+    n_train = len(glob.glob(os.path.join(target, "train*.h5")))
+    n_test = len(glob.glob(os.path.join(target, "test*.h5")))
+    print(f"[ShapeNet] Ready at {target}: {n_train} train + {n_test} test H5 files")
+    return n_train > 0 and n_test > 0
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -191,6 +260,25 @@ def download_scanobjectnn():
 S3DIS_GDRIVE_ID = "1MX3ZCnwqyRztG1vFRiHkKTz68ZJeHS4Y"
 
 
+def _s3dis_area_dirs_ready(out_dir: str):
+    found = [
+        d for d in os.listdir(out_dir)
+        if d.startswith("Area_")
+        and os.path.isdir(os.path.join(out_dir, d))
+        and any(name.endswith(".npy") for name in os.listdir(os.path.join(out_dir, d)))
+    ] if os.path.isdir(out_dir) else []
+    return len(found) >= 6, found
+
+
+def _s3dis_flat_ready(out_dir: str):
+    raw_dir = os.path.join(out_dir, "raw")
+    if not os.path.isdir(raw_dir):
+        return False, []
+    files = [f for f in os.listdir(raw_dir) if f.startswith("Area_") and f.endswith(".npy")]
+    areas = sorted({f.split("_")[1] for f in files if len(f.split("_")) > 1})
+    return len(areas) >= 6, files
+
+
 def download_s3dis():
     """
     S3DIS preprocessed per-room .npy files.
@@ -200,14 +288,15 @@ def download_s3dis():
     Fallback: Manual download from Stanford + preprocessing
     """
     out_dir = os.path.join(DATA_ROOT, "s3dis")
-    sentinel = os.path.join(out_dir, "Area_5")
-
-    if os.path.isdir(sentinel):
-        import glob
-        npys = glob.glob(os.path.join(sentinel, "*.npy"))
-        if len(npys) > 0:
-            print(f"[S3DIS] Already present at {out_dir} ({len(npys)} rooms in Area_5)")
-            return True
+    ready, found_areas = _s3dis_area_dirs_ready(out_dir)
+    if ready:
+        print(f"[S3DIS] Already present at {out_dir} ({len(found_areas)} area folders)")
+        return True
+    flat_ready, flat_files = _s3dis_flat_ready(out_dir)
+    if flat_ready:
+        print(f"[S3DIS] Already present at {out_dir}/raw ({len(flat_files)} flat room files)")
+        print("[S3DIS] Loader will use the flat raw/Area_*.npy layout directly.")
+        return True
 
     os.makedirs(out_dir, exist_ok=True)
 
@@ -216,21 +305,30 @@ def download_s3dis():
     try:
         import gdown
         zip_path = os.path.join(DATA_ROOT, "s3dis_processed.zip")
-        gdown.download(id=S3DIS_GDRIVE_ID, output=zip_path, quiet=False)
+        if os.path.exists(zip_path):
+            print(f"[S3DIS] Using existing archive: {zip_path}")
+        else:
+            gdown.download(id=S3DIS_GDRIVE_ID, output=zip_path, quiet=False)
 
         print("[S3DIS] Extracting (this may take a few minutes) ...")
-        with zipfile.ZipFile(zip_path, 'r') as zf:
-            zf.extractall(out_dir)
+        if not _extract_archive(zip_path, out_dir):
+            raise RuntimeError("downloaded file is not a supported archive")
         os.remove(zip_path)
 
         # Verify structure — look for Area_* directories
-        found_areas = [d for d in os.listdir(out_dir)
-                       if d.startswith("Area_") and os.path.isdir(os.path.join(out_dir, d))]
-        if len(found_areas) >= 6:
+        ready, found_areas = _s3dis_area_dirs_ready(out_dir)
+        if ready:
             print(f"[S3DIS] Done: {len(found_areas)} areas")
             return True
 
+        flat_ready, flat_files = _s3dis_flat_ready(out_dir)
+        if flat_ready:
+            print(f"[S3DIS] Done: {len(flat_files)} flat raw room files")
+            print("[S3DIS] Loader will use data/s3dis/raw/Area_*.npy directly.")
+            return True
+
         # If extracted into a subdirectory, relocate
+        found_areas = []
         for item in os.listdir(out_dir):
             sub = os.path.join(out_dir, item)
             if os.path.isdir(sub) and item not in found_areas:
@@ -240,8 +338,14 @@ def download_s3dis():
                                   os.path.join(out_dir, child))
                         found_areas.append(child)
 
-        if len(found_areas) >= 6:
+        ready, found_areas = _s3dis_area_dirs_ready(out_dir)
+        if ready:
             print(f"[S3DIS] Done: {len(found_areas)} areas (relocated)")
+            return True
+        flat_ready, flat_files = _s3dis_flat_ready(out_dir)
+        if flat_ready:
+            print(f"[S3DIS] Done: {len(flat_files)} flat raw room files")
+            print("[S3DIS] Loader will use data/s3dis/raw/Area_*.npy directly.")
             return True
 
     except ImportError:
@@ -267,7 +371,8 @@ def download_s3dis():
     print()
     print("  Option 3: Download OpenPoints preprocessed S3DIS")
     print(f"    gdown --id {S3DIS_GDRIVE_ID} -O data/s3dis_processed.zip")
-    print(f"    unzip data/s3dis_processed.zip -d data/s3dis/")
+    print(f"    python datasets/download.py --s3dis")
+    print("    # The loader accepts either data/s3dis/Area_*/ or data/s3dis/raw/Area_*.npy")
     print()
     return False
 
@@ -380,6 +485,7 @@ def main():
 Examples:
     python datasets/download.py --all
     python datasets/download.py --scanobj
+    python datasets/download.py --shapenet_local /path/to/kaggle/shapenetpart.zip
     python datasets/download.py --s3dis_preprocess /data/Stanford3dDataset_v1.2_Aligned_Version
         """,
     )
@@ -387,6 +493,8 @@ Examples:
                    help="Download all three datasets")
     p.add_argument("--shapenet", action="store_true",
                    help="Download ShapeNetPart HDF5")
+    p.add_argument("--shapenet_local", type=str, default=None,
+                   help="Prepare local/Kaggle ShapeNetPart HDF5 zip or folder")
     p.add_argument("--scanobj", action="store_true",
                    help="Download ScanObjectNN PB_T50_RS")
     p.add_argument("--s3dis", action="store_true",
@@ -394,6 +502,10 @@ Examples:
     p.add_argument("--s3dis_preprocess", type=str, default=None,
                    help="Preprocess raw S3DIS from Stanford directory")
     args = p.parse_args()
+
+    if args.shapenet_local:
+        prepare_shapenet_local(args.shapenet_local)
+        return
 
     if args.s3dis_preprocess:
         import numpy as np

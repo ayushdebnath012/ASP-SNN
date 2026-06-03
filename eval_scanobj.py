@@ -18,6 +18,17 @@ from datasets.scanobjectnn import ScanObjectNNDataset
 from models.asp_classifier import ASPClassifier
 
 
+def recompute_geo_gpu(slices):
+    """Recompute the 8-D slice geometry descriptor after GPU TTA."""
+    xyz = slices[:, :, :, :3]
+    centroid = xyz.mean(dim=2)
+    variance = xyz.var(dim=2, unbiased=False)
+    dists = torch.linalg.norm(xyz - centroid.unsqueeze(2), dim=-1)
+    max_dist = dists.max(dim=2).values.unsqueeze(-1)
+    dist_to_origin = torch.linalg.norm(centroid, dim=-1).unsqueeze(-1)
+    return torch.cat([centroid, variance, max_dist, dist_to_origin], dim=-1)
+
+
 def augment_vote_gpu(slices, geo):
     """One random z-rotation augmentation on GPU tensors for TTA."""
     device, dtype = slices.device, slices.dtype
@@ -34,7 +45,7 @@ def augment_vote_gpu(slices, geo):
     slices_aug[:, :, :, :3] = xyz.reshape(B, M, K, 3)
 
     geo_aug = geo.clone()
-    geo_aug[:, :, :3] = geo[:, :, :3] @ rot
+    geo_aug = recompute_geo_gpu(slices_aug)
 
     return slices_aug, geo_aug
 

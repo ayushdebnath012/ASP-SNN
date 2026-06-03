@@ -63,6 +63,9 @@ def main():
     print(f"  ASP-SNN S3DIS Area {getattr(cfg, 'test_area', 5)} Scene Segmentation")
     print(f"  Epochs: {cfg.epochs}  LR: {cfg.lr}  Batch: {cfg.batch_size}")
     print(f"  Device: {device}")
+    test_area = getattr(cfg, 'test_area', 5)
+    train_areas = [a for a in [1, 2, 3, 4, 5, 6] if a != test_area]
+    print(f"  Train areas: {train_areas}  Test area: {test_area}")
     print(f"{'='*60}\n")
 
     # ── Datasets ──────────────────────────────────────────────────────
@@ -81,6 +84,12 @@ def main():
         test_ds, batch_size=cfg.batch_size, shuffle=False,
         num_workers=cfg.num_workers, pin_memory=True,
         persistent_workers=pw,
+    )
+    log_interval = int(getattr(cfg, 'log_interval', 100))
+    train_batches = len(train_loader)
+    print(
+        f"Train batches/epoch: {train_batches} "
+        f"(progress prints every {log_interval} batches)"
     )
 
     # ── Class weights ─────────────────────────────────────────────────
@@ -162,7 +171,8 @@ def main():
         model.train()
         total_loss = n_batches = 0
 
-        for slices, geo, pts_feat, sid_arr, sem_labels, cat_ids in train_loader:
+        for batch_idx, (slices, geo, pts_feat, sid_arr, sem_labels,
+                        cat_ids) in enumerate(train_loader, start=1):
             slices = slices.to(device, non_blocking=True)
             geo = geo.to(device, non_blocking=True)
             pts_feat = pts_feat.to(device, non_blocking=True)
@@ -190,6 +200,24 @@ def main():
 
             total_loss += loss.item()
             n_batches += 1
+
+            if log_interval > 0 and (
+                batch_idx % log_interval == 0 or batch_idx == train_batches
+            ):
+                elapsed_part = time.time() - t0
+                sec_per_batch = elapsed_part / max(batch_idx, 1)
+                eta = sec_per_batch * max(train_batches - batch_idx, 0)
+                mem_msg = ""
+                if device.type == "cuda":
+                    mem_gb = torch.cuda.max_memory_allocated(device) / (1024 ** 3)
+                    mem_msg = f" gpu_mem={mem_gb:.1f}GB"
+                print(
+                    f"  batch {batch_idx:4d}/{train_batches} "
+                    f"loss={total_loss/max(n_batches, 1):.4f} "
+                    f"elapsed={elapsed_part/60:.1f}m eta={eta/60:.1f}m"
+                    f"{mem_msg}",
+                    flush=True,
+                )
 
         scheduler.step()
         train_loss = total_loss / max(n_batches, 1)

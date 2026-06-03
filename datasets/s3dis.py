@@ -19,12 +19,13 @@ Returns per sample:
     cat_id        0            dummy (no category conditioning)
 """
 
-import os
 import glob
+import os
+import re
 import numpy as np
 from torch.utils.data import Dataset
 
-from .slicing import slice_point_cloud, assign_points_to_slices
+from .slicing import slice_point_cloud, assign_points_to_slices, compute_geo
 from .transforms import augment_seg
 
 
@@ -38,6 +39,29 @@ NUM_CLASSES = 13
 # Areas for train/test split
 TRAIN_AREAS = [1, 2, 3, 4, 6]
 TEST_AREA = 5
+
+
+def _area_from_filename(path: str):
+    """Return S3DIS area id from names like Area_1_office_1.npy."""
+    m = re.search(r"Area[_\s-]*(\d)", os.path.basename(path))
+    return int(m.group(1)) if m else None
+
+
+def _find_area_files(data_dir: str, area: int):
+    """Support both Area_N folders and flat OpenPoints raw/*.npy layout."""
+    area_dir = os.path.join(data_dir, f"Area_{area}")
+    files = sorted(glob.glob(os.path.join(area_dir, "*.npy")))
+    if files:
+        return files
+
+    flat_candidates = []
+    for subdir in (data_dir, os.path.join(data_dir, "raw")):
+        flat_candidates.extend(glob.glob(os.path.join(subdir, "*.npy")))
+
+    return sorted(
+        p for p in flat_candidates
+        if _area_from_filename(p) == area
+    )
 
 
 class S3DISDataset(Dataset):
@@ -62,17 +86,21 @@ class S3DISDataset(Dataset):
             areas = [a for a in [1, 2, 3, 4, 5, 6] if a != test_area]
         else:
             areas = [test_area]
+        self.areas = areas
 
         # Load all room files
         self.rooms = []
         for area in areas:
-            area_dir = os.path.join(data_dir, f"Area_{area}")
-            if not os.path.isdir(area_dir):
+            npy_files = _find_area_files(data_dir, area)
+            if not npy_files:
+                area_dir = os.path.join(data_dir, f"Area_{area}")
                 raise FileNotFoundError(
                     f"S3DIS area directory not found: {area_dir}\n"
+                    f"Accepted layouts:\n"
+                    f"  {data_dir}/Area_{area}/*.npy\n"
+                    f"  {data_dir}/raw/Area_{area}_*.npy\n"
                     f"Run: python datasets/download.py --s3dis"
                 )
-            npy_files = sorted(glob.glob(os.path.join(area_dir, "*.npy")))
             for npy_path in npy_files:
                 room_data = np.load(npy_path)  # [N, 7]: x,y,z,r,g,b,label
                 self.rooms.append(room_data.astype(np.float32))
@@ -96,7 +124,7 @@ class S3DISDataset(Dataset):
             self.test_blocks = self._precompute_test_blocks()
             self._len = len(self.test_blocks)
 
-        print(f"[S3DIS] '{split}': {len(self.rooms)} rooms, "
+        print(f"[S3DIS] '{split}' areas {areas}: {len(self.rooms)} rooms, "
               f"{self.total_points:,} points, {self._len} samples/epoch")
 
     def _precompute_test_blocks(self):
@@ -230,6 +258,7 @@ class S3DISDataset(Dataset):
         # Augment (training only)
         if self.split == 'train' and self.cfg is not None:
             slices, pts_features = augment_seg(slices, pts_features, self.cfg)
+            geo = np.stack([compute_geo(s) for s in slices])
 
         return (
             slices.astype(np.float32),          # [M, K, C]
@@ -250,8 +279,7 @@ def compute_class_weights(data_dir: str, test_area: int = 5) -> np.ndarray:
     """
     counts = np.zeros(NUM_CLASSES, dtype=np.float64)
     for area in [a for a in [1, 2, 3, 4, 5, 6] if a != test_area]:
-        area_dir = os.path.join(data_dir, f"Area_{area}")
-        for npy_path in glob.glob(os.path.join(area_dir, "*.npy")):
+        for npy_path in _find_area_files(data_dir, area):
             room = np.load(npy_path)
             labels = room[:, 6].astype(int)
             for c in range(NUM_CLASSES):

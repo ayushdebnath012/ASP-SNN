@@ -14,7 +14,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, Subset
 from torch.amp import autocast, GradScaler
 from torch.optim.swa_utils import AveragedModel, SWALR
 
@@ -46,17 +46,25 @@ def main():
     print(f"{'='*60}\n")
 
     # ── Datasets ──────────────────────────────────────────────────────
-    train_ds = ScanObjectNNDataset(cfg.data_dir, 'train', cfg)
-    test_ds = ScanObjectNNDataset(cfg.data_dir, 'test', cfg)
+    train_ds = ScanObjectNNDataset(
+        cfg.data_dir, 'train', cfg, augment=True, name='train'
+    )
+    val_ds = ScanObjectNNDataset(
+        cfg.data_dir, 'train', cfg, augment=False, name='val-from-train'
+    )
+    test_ds = ScanObjectNNDataset(
+        cfg.data_dir, 'test', cfg, augment=False, name='test'
+    )
 
     val_frac = getattr(cfg, 'val_fraction', 0.1)
     n_val = int(len(train_ds) * val_frac)
     n_train = len(train_ds) - n_val
-    train_sub, val_sub = random_split(
-        train_ds, [n_train, n_val],
-        generator=torch.Generator().manual_seed(cfg.seed),
-    )
+    split_gen = torch.Generator().manual_seed(cfg.seed)
+    perm = torch.randperm(len(train_ds), generator=split_gen).tolist()
+    train_sub = Subset(train_ds, perm[:n_train])
+    val_sub = Subset(val_ds, perm[n_train:])
     print(f"Train: {n_train} | Val: {n_val} | Test: {len(test_ds)}")
+    print("Validation uses the train H5 split with augmentation disabled.")
 
     # drop_last safety: only drop if we have enough samples to spare
     drop_last = n_train >= cfg.batch_size * 2
@@ -137,7 +145,7 @@ def main():
     run_name = f"scanobj_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     log_path = os.path.join(cfg.log_dir, f"{run_name}.csv")
     with open(log_path, 'w') as f:
-        f.write("epoch,train_loss,train_acc,val_acc,lr,time\n")
+        f.write("epoch,train_loss,train_acc,val_acc,test_acc,lr,time\n")
 
     # ── Training loop ─────────────────────────────────────────────────
     for epoch in range(start_epoch, cfg.epochs):
@@ -195,13 +203,24 @@ def main():
         eval_interval = getattr(cfg, 'eval_interval', 1)
         if (epoch + 1) % eval_interval == 0 or epoch == cfg.epochs - 1:
             val_acc = _evaluate(model, val_loader, device)
+            test_eval_interval = getattr(cfg, 'test_eval_interval', 0)
+            test_acc = None
+            if test_eval_interval and (
+                (epoch + 1) % test_eval_interval == 0
+                or epoch == cfg.epochs - 1
+            ):
+                test_acc = _evaluate(model, test_loader, device)
             elapsed = time.time() - t0
 
+            test_msg = (
+                f" test={test_acc*100:.2f}%"
+                if test_acc is not None else ""
+            )
             print(
                 f"Epoch [{epoch+1:3d}/{cfg.epochs}] "
                 f"tau={tau:.3f} lr={lr_now:.2e} | "
                 f"loss={train_loss:.4f} train={train_acc*100:.1f}% "
-                f"val={val_acc*100:.2f}% | {elapsed:.0f}s"
+                f"val={val_acc*100:.2f}%{test_msg} | {elapsed:.0f}s"
             )
 
             if val_acc > best_val_acc:
@@ -217,8 +236,10 @@ def main():
                 print(f"    >> New best val: {val_acc*100:.2f}%")
 
             with open(log_path, 'a') as f:
+                test_value = "" if test_acc is None else f"{test_acc*100:.2f}"
                 f.write(f"{epoch+1},{train_loss:.4f},{train_acc*100:.2f},"
-                        f"{val_acc*100:.2f},{lr_now:.2e},{elapsed:.0f}\n")
+                        f"{val_acc*100:.2f},{test_value},"
+                        f"{lr_now:.2e},{elapsed:.0f}\n")
         else:
             elapsed = time.time() - t0
             print(

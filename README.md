@@ -171,6 +171,14 @@ Download ShapeNetPart:
 python datasets/download.py --shapenet
 ```
 
+If the Stanford link is slow/down, a Kaggle mirror is fine only if it contains
+the same HDF5 layout (`train*.h5`, `test*.h5`, with `data`, `label`, `pid`
+keys). Prepare a downloaded Kaggle zip/folder like this:
+
+```bash
+python datasets/download.py --shapenet_local /path/to/kaggle/shapenetpart.zip
+```
+
 Quick 2-epoch smoke training:
 
 ```bash
@@ -181,7 +189,7 @@ python train_shapenet.py --config configs/shapenet_seg.yaml \
 Full training:
 
 ```bash
-python train_shapenet.py --config configs/shapenet_seg.yaml --set epochs=500
+bash scripts/train_shapenet_full.sh
 ```
 
 Evaluate:
@@ -210,14 +218,19 @@ python train_scanobj.py --config configs/scanobj_cls.yaml \
 Full training:
 
 ```bash
-python train_scanobj.py --config configs/scanobj_cls.yaml --set epochs=500
+bash scripts/train_scanobj_full.sh
 ```
 
 Evaluate:
 
 ```bash
-python eval_scanobj.py --ckpt checkpoints/scanobj_best.pt --config configs/scanobj_cls.yaml --n_votes 10
+python eval_scanobj.py --ckpt checkpoints/scanobj_best.pt --config configs/scanobj_cls.yaml --n_votes 1
 ```
+
+Use `--n_votes 10` only as an optional TTA check after the no-TTA number is
+healthy. If an older run produced about 30-40% test accuracy after high train
+accuracy, discard that checkpoint and retrain; the current code recomputes
+geometry after train augmentation and TTA.
 
 ### S3DIS Semantic Segmentation
 
@@ -239,8 +252,13 @@ python train_s3dis.py --config configs/s3dis_seg.yaml \
 Full training:
 
 ```bash
-python train_s3dis.py --config configs/s3dis_seg.yaml --set epochs=500
+bash scripts/train_s3dis_full.sh
 ```
+
+The default S3DIS protocol is Area-5 testing: the model trains on Areas
+1,2,3,4,6 and evaluates on Area 5. The header now prints both lists. The
+default S3DIS batch size is 64 for H100-style 80 GB GPUs; lower it with
+`BATCH_SIZE=32 bash scripts/train_s3dis_full.sh` if needed.
 
 Evaluate:
 
@@ -303,12 +321,13 @@ GPU_SHAPENET=0 GPU_SCANOBJ=1 GPU_S3DIS=2 GPU_FOVEATER=3 \
 Manual parallel full training:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python train_shapenet.py --config configs/shapenet_seg.yaml &
-CUDA_VISIBLE_DEVICES=1 python train_scanobj.py --config configs/scanobj_cls.yaml &
-CUDA_VISIBLE_DEVICES=2 python train_s3dis.py --config configs/s3dis_seg.yaml &
+GPU_SHAPENET=0 GPU_SCANOBJ=1 GPU_S3DIS=2 bash scripts/train_pointclouds_parallel.sh &
+PID_PC=$!
 CUDA_VISIBLE_DEVICES=3 python train_imagenet_foveater.py --config configs/imagenet_foveater.yaml \
   --set data_dir=/path/to/imagenet num_classes=1000 epochs=500 &
-wait
+PID_IMG=$!
+wait "$PID_PC"
+wait "$PID_IMG"
 ```
 
 ---
@@ -385,13 +404,17 @@ ASP-SNN/
 │   ├── shapenet_seg.yaml           #   500 epochs, bs=32, pts_per_slice=128
 │   ├── scanobj_cls.yaml            #   500 epochs, bs=32, SO(3) aug, SWA, deep MLP head
 │   ├── imagenet_foveater.yaml      #   FoveaTer ASP on ImageNet/ImageNet-100
-│   └── s3dis_seg.yaml              #   500 epochs, bs=16, RGB+height, class weights
+│   └── s3dis_seg.yaml              #   500 epochs, bs=64, RGB+height, class weights
 │
 ├── scripts/                        # SLURM job scripts for GPU cluster
 │   ├── run_shapenet.sh             #   18h wall, 1 GPU, 8 CPUs, 32G
 │   ├── run_scanobj.sh              #   8h wall, 1 GPU, 8 CPUs, 32G
 │   ├── run_s3dis.sh                #   72h wall, 1 GPU, 8 CPUs, 64G
 │   ├── run_imagenet_foveater.sh    #   FoveaTer ASP ImageNet helper
+│   ├── train_shapenet_full.sh      #   Shell-first 500-epoch ShapeNetPart run
+│   ├── train_scanobj_full.sh       #   Shell-first 500-epoch ScanObjectNN run
+│   ├── train_s3dis_full.sh         #   Shell-first 500-epoch S3DIS run
+│   ├── train_pointclouds_parallel.sh # Parallel full point-cloud trainings
 │   ├── smoke_train.sh              #   Quick serial 2-epoch test for all 3 point-cloud datasets
 │   └── smoke_train_parallel.sh     #   Quick parallel smoke jobs across GPUs
 │
@@ -540,7 +563,14 @@ python datasets/download.py --all
 # Or individually:
 python datasets/download.py --shapenet    # ~346 MB from Stanford
 python datasets/download.py --scanobj     # ~50 MB from HuggingFace
-python datasets/download.py --s3dis       # ~1.3 GB via gdown
+python datasets/download.py --s3dis       # ~15.5 GB via gdown/OpenPoints
+```
+
+ShapeNetPart Kaggle mirrors are acceptable if they contain the Stanford HDF5
+files:
+
+```bash
+python datasets/download.py --shapenet_local /path/to/kaggle/shapenetpart.zip
 ```
 
 | Dataset | Source | Auth required? | Auto-download? |
@@ -566,6 +596,7 @@ data/
 ├── ScanObjectNN/main_split/        # training_objectdataset_augmentedrot_scale75.h5
 │                                   # test_objectdataset_augmentedrot_scale75.h5
 └── s3dis/Area_1/ ... Area_6/       # per-room .npy files [N, 7]: x,y,z,r,g,b,label
+# or: s3dis/raw/Area_1_*.npy ... Area_6_*.npy
 ```
 
 ---
@@ -580,7 +611,7 @@ partition and account names, then submit:
 ```bash
 sbatch scripts/run_shapenet.sh     # ~12-13h on H100 for 500 epochs
 sbatch scripts/run_scanobj.sh      # ~4-5h on H100 for 500 epochs
-sbatch scripts/run_s3dis.sh        # ~42-67h on H100 for 500 epochs
+sbatch scripts/run_s3dis.sh        # ~18-28h on H100 for 500 epochs at batch 64
 ```
 
 All three run in parallel on separate GPUs.
@@ -588,9 +619,7 @@ All three run in parallel on separate GPUs.
 ### Option B: Interactive (3 terminals)
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python train_shapenet.py --config configs/shapenet_seg.yaml --set epochs=500 &
-CUDA_VISIBLE_DEVICES=1 python train_scanobj.py --config configs/scanobj_cls.yaml --set epochs=500 &
-CUDA_VISIBLE_DEVICES=2 python train_s3dis.py --config configs/s3dis_seg.yaml --set epochs=500 &
+GPU_SHAPENET=0 GPU_SCANOBJ=1 GPU_S3DIS=2 bash scripts/train_pointclouds_parallel.sh
 ```
 
 ### Quick smoke training (verify full pipeline with real data, ~10 min)
@@ -615,7 +644,7 @@ Resumes model weights, optimizer state, LR scheduler, AMP scaler, and epoch coun
 ### Override config values from CLI
 
 ```bash
-python train_scanobj.py --config configs/scanobj_cls.yaml --set epochs=500 lr=1e-3 batch_size=16
+python train_scanobj.py --config configs/scanobj_cls.yaml --set epochs=500 lr=1e-3 batch_size=32
 ```
 
 ### Monitor training
@@ -623,7 +652,7 @@ python train_scanobj.py --config configs/scanobj_cls.yaml --set epochs=500 lr=1e
 ```bash
 squeue -u $USER                      # SLURM job status
 tail -f logs/scanobj_*.log           # Live SLURM output
-cat logs/scanobj_*.csv               # CSV: epoch, loss, train_acc, val_acc, lr, time
+cat logs/scanobj_*.csv               # CSV: epoch, loss, train_acc, val_acc, test_acc, lr, time
 ```
 
 ---
@@ -631,8 +660,8 @@ cat logs/scanobj_*.csv               # CSV: epoch, loss, train_acc, val_acc, lr,
 ## Evaluation
 
 ```bash
-# ScanObjectNN — with 10-vote test-time augmentation
-python eval_scanobj.py --ckpt checkpoints/scanobj_best.pt --n_votes 10
+# ScanObjectNN - first check no-TTA accuracy
+python eval_scanobj.py --ckpt checkpoints/scanobj_best.pt --n_votes 1
 
 # ShapeNetPart — with per-category IoU breakdown
 python eval_shapenet.py --ckpt checkpoints/shapenet_best.pt --per_cat
@@ -657,7 +686,7 @@ Estimated training time on NVIDIA H100 80GB:
 |---|---|---|---|---|
 | ScanObjectNN | 500 | 32 | ~30s | ~4-5h |
 | ShapeNetPart | 500 | 32 | ~1.5min | ~12-13h |
-| S3DIS | 500 | 16 | ~5-8min | ~42-67h |
+| S3DIS | 500 | 64 | ~2-3min | ~18-28h |
 
 ---
 

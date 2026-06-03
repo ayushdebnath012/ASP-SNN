@@ -18,7 +18,7 @@ import glob
 import numpy as np
 from torch.utils.data import Dataset
 
-from .slicing import slice_point_cloud, assign_points_to_slices
+from .slicing import slice_point_cloud, assign_points_to_slices, compute_geo
 from .transforms import augment_seg
 
 
@@ -134,6 +134,7 @@ class ShapeNetPartDataset(Dataset):
         # Augment (training only) — shared transform on slices + pts
         if self.split == 'train' and self.cfg is not None:
             slices, pts_n = augment_seg(slices, pts_n, self.cfg)
+            geo = np.stack([compute_geo(s) for s in slices])
 
         return (
             slices.astype(np.float32),        # [M, K, 6]

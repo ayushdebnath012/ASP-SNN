@@ -18,7 +18,7 @@ import os
 import numpy as np
 from torch.utils.data import Dataset
 
-from .slicing import slice_point_cloud
+from .slicing import slice_point_cloud, compute_geo
 from .transforms import augment_slices
 
 
@@ -29,7 +29,8 @@ _TEST_FILE = "test_objectdataset_augmentedrot_scale75.h5"
 
 class ScanObjectNNDataset(Dataset):
 
-    def __init__(self, data_dir: str, split: str, cfg=None):
+    def __init__(self, data_dir: str, split: str, cfg=None,
+                 augment: bool = None, name: str = None):
         """
         Args:
             data_dir: path to ScanObjectNN/main_split/
@@ -40,6 +41,8 @@ class ScanObjectNNDataset(Dataset):
         self.split = split
         self.cfg = cfg
         self.n_points = getattr(cfg, 'num_points', 2048)
+        self.augment = (split == 'train') if augment is None else augment
+        self.name = name or split
 
         try:
             import h5py
@@ -64,8 +67,9 @@ class ScanObjectNNDataset(Dataset):
         if self.labels.ndim == 2:
             self.labels = self.labels.squeeze(-1)
 
-        print(f"[ScanObjectNN] '{split}': {len(self.pts)} shapes, "
-              f"15 classes (PB_T50_RS)")
+        aug_state = "on" if self.augment else "off"
+        print(f"[ScanObjectNN] '{self.name}': {len(self.pts)} shapes, "
+              f"15 classes (PB_T50_RS), augment={aug_state}")
 
     def __len__(self):
         return len(self.pts)
@@ -104,8 +108,9 @@ class ScanObjectNNDataset(Dataset):
         slices, geo, _ = slice_point_cloud(pts6, M, K, seed=fps_seed)
 
         # Augment (training only)
-        if self.split == 'train' and self.cfg is not None:
+        if self.augment and self.cfg is not None:
             slices = augment_slices(slices, self.cfg)
+            geo = np.stack([compute_geo(s) for s in slices])
 
         return (
             slices.astype(np.float32),  # [M, K, 6]

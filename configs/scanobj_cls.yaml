@@ -62,7 +62,9 @@ aug_point_dropout: 0.3
 aug_slice_dropout: 0.15
 
 # ── Test-time augmentation ─────────────────────────────────────────────
-n_votes: 10
+n_votes: 1
+test_eval_interval: 25
+val_fraction: 0.1
 
 # ── Logging ────────────────────────────────────────────────────────────
 eval_interval: 1

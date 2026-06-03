@@ -33,7 +33,7 @@ point_feat_dim: 64
 
 # ── Training ───────────────────────────────────────────────────────────
 epochs: 500
-batch_size: 16
+batch_size: 64
 lr: 1e-3
 weight_decay: 0.01
 grad_clip: 1.0
@@ -59,7 +59,8 @@ aug_elastic: false
 
 # ── Logging ────────────────────────────────────────────────────────────
 eval_interval: 5
+log_interval: 100
 log_dir: logs
 ckpt_dir: checkpoints
 seed: 42
-num_workers: 4
+num_workers: 8

@@ -179,6 +179,14 @@ keys). Prepare a downloaded Kaggle zip/folder like this:
 python datasets/download.py --shapenet_local /path/to/kaggle/shapenetpart.zip
 ```
 
+For the Kaggle dataset `majdouline20/shapenetpart-dataset`, use this shell
+script. That Kaggle copy is the raw `PartAnnotation` layout, so the script
+downloads it and converts it to the HDF5 format expected by `train_shapenet.py`:
+
+```bash
+bash scripts/prepare_shapenet_kaggle.sh
+```
+
 Quick 2-epoch smoke training:
 
 ```bash
@@ -571,6 +579,15 @@ files:
 
 ```bash
 python datasets/download.py --shapenet_local /path/to/kaggle/shapenetpart.zip
+```
+
+The specific Kaggle dataset `majdouline20/shapenetpart-dataset` is a raw
+`PartAnnotation` tree, not the same HDF5 file layout as Stanford. Use:
+
+```bash
+bash scripts/prepare_shapenet_kaggle.sh
+# or, if already downloaded/extracted:
+python datasets/download.py --shapenet_raw /path/to/PartAnnotation_or_parent_folder
 ```
 
 | Dataset | Source | Auth required? | Auto-download? |

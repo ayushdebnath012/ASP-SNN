@@ -82,12 +82,22 @@ class ShapeNetPartDataset(Dataset):
                 f"Run: python datasets/download.py --shapenet"
             )
 
+        # Optional RAM cap applied during loading to avoid OOM on low-memory hosts
+        max_shapes = getattr(cfg, 'max_shapes', 0)
+
         all_pts, all_cat, all_pid = [], [], []
+        n_loaded = 0
         for path in h5_files:
             with h5py.File(path, 'r') as f:
-                all_pts.append(f['data'][:].astype(np.float32))
-                all_cat.append(f['label'][:].astype(np.int64))
-                all_pid.append(f['pid'][:].astype(np.int64))
+                n = f['data'].shape[0]
+                if max_shapes and n_loaded + n > max_shapes:
+                    n = max_shapes - n_loaded
+                all_pts.append(f['data'][:n].astype(np.float32))
+                all_cat.append(f['label'][:n].astype(np.int64))
+                all_pid.append(f['pid'][:n].astype(np.int32))
+                n_loaded += n
+            if max_shapes and n_loaded >= max_shapes:
+                break
 
         self.pts = np.concatenate(all_pts, axis=0)
         cats = np.concatenate(all_cat, axis=0)

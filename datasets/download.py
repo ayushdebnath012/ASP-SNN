@@ -130,12 +130,30 @@ def download_shapenet():
     return False
 
 
+def _find_kagglehub_cached_archive():
+    """Return the path to a cached kagglehub archive for ShapeNetPart, or None."""
+    owner, dataset = SHAPENET_KAGGLE_SLUG.split("/")
+    dataset_dir = os.path.join(
+        os.path.expanduser("~"), ".cache", "kagglehub", "datasets", owner, dataset
+    )
+    if not os.path.isdir(dataset_dir):
+        return None
+    for fname in sorted(os.listdir(dataset_dir), reverse=True):
+        if fname.endswith(".archive"):
+            path = os.path.join(dataset_dir, fname)
+            if os.path.getsize(path) > 100_000_000:  # at least 100 MB = real archive
+                return path
+    return None
+
+
 def download_shapenet_kaggle():
     """
     Download the Kaggle ShapeNetPart PartAnnotation dataset and convert it.
 
-    The preferred path uses kagglehub. If kagglehub is unavailable or cannot
-    access the dataset, this falls back to the official Kaggle CLI.
+    Tries in order:
+      1. kagglehub full extraction (normal case)
+      2. Streaming conversion from a cached kagglehub archive (low-disk fallback)
+      3. Kaggle CLI extraction
     """
     out_dir = os.path.join(DATA_ROOT, SHAPENET_DIR)
     sentinel = os.path.join(out_dir, "all_object_categories.txt")
@@ -160,8 +178,38 @@ def download_shapenet_kaggle():
     except Exception as e:
         print(f"[ShapeNet] kagglehub failed: {e}")
 
-    if raw_dir is None:
-        raw_dir = _download_shapenet_with_kaggle_cli(download_root)
+    # If extraction succeeded, use the normal disk-based converter
+    if raw_dir is not None:
+        return prepare_shapenet_raw(raw_dir)
+
+    # kagglehub may have downloaded the archive but run out of disk space on
+    # extraction. Try to convert the cached archive directly to HDF5 without
+    # touching the filesystem beyond the ~350 MB output.
+    archive_path = _find_kagglehub_cached_archive()
+    if archive_path:
+        mb = os.path.getsize(archive_path) // 1_000_000
+        print(f"[ShapeNet] Cached archive found ({mb} MB). "
+              "Converting directly to HDF5 (no disk extraction needed)...")
+        try:
+            try:
+                from datasets.convert_shapenet_raw import (
+                    convert_shapenet_archive_streaming, write_metadata,
+                )
+            except ImportError:
+                from convert_shapenet_raw import (
+                    convert_shapenet_archive_streaming, write_metadata,
+                )
+            if os.path.isdir(out_dir):
+                shutil.rmtree(out_dir)
+            os.makedirs(out_dir, exist_ok=True)
+            n_tr, n_te = convert_shapenet_archive_streaming(archive_path, out_dir)
+            if os.path.exists(sentinel) and n_tr > 0 and n_te > 0:
+                print(f"[ShapeNet] Done via streaming: {n_tr} train + {n_te} test")
+                return True
+        except Exception as e:
+            print(f"[ShapeNet] Streaming conversion failed: {e}")
+
+    raw_dir = _download_shapenet_with_kaggle_cli(download_root)
 
     if raw_dir is None:
         print("[ShapeNet] Kaggle download did not produce a raw PartAnnotation folder.")

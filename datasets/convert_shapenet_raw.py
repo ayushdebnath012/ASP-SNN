@@ -67,15 +67,48 @@ CATEGORY_NAMES = [
 # Per-category part label offsets — global part label is offset + local part
 PART_OFFSET = {
     0: 0,   1: 4,   2: 6,   3: 8,   4: 12,  5: 16,  6: 19,  7: 22,
-    8: 24,  9: 28,  10: 30, 11: 36, 12: 38, 13: 41, 14: 44, 15: 46,
+    8: 24,  9: 28,  10: 30, 11: 36, 12: 38, 13: 41, 14: 44, 15: 47,
 }
 PART_COUNT = {
     0: 4,   1: 2,   2: 2,   3: 4,   4: 4,   5: 3,   6: 3,   7: 2,
-    8: 4,   9: 2,   10: 6,  11: 2,  12: 3,  13: 3,  14: 2,  15: 3,
+    8: 4,   9: 2,   10: 6,  11: 2,  12: 3,  13: 3,  14: 3,  15: 3,
+}
+CAT_TO_GLOBAL_PARTS = {
+    0:  [0, 1, 2, 3],
+    1:  [4, 5],
+    2:  [6, 7],
+    3:  [8, 9, 10, 11],
+    4:  [12, 13, 14, 15],
+    5:  [16, 17, 18],
+    6:  [19, 20, 21],
+    7:  [22, 23],
+    8:  [24, 25, 26, 27],
+    9:  [28, 29],
+    10: [30, 31, 32, 33, 34, 35],
+    11: [36, 37],
+    12: [38, 39, 40],
+    13: [41, 42, 43],
+    14: [44, 45, 46],
+    15: [47, 48, 49],
 }
 
 NUM_POINTS_PER_SHAPE = 2048
 SHAPES_PER_H5 = 2048  # how many shapes per output h5 file
+
+
+def to_global_part_labels(part_n: np.ndarray, cat_idx: int):
+    """Return category-global ShapeNetPart labels, or None if invalid."""
+    observed_parts = set(map(int, np.unique(part_n)))
+    valid_parts = set(CAT_TO_GLOBAL_PARTS[cat_idx])
+    if observed_parts.issubset(valid_parts):
+        return part_n
+
+    local_count = PART_COUNT[cat_idx]
+    if part_n.min() >= 1 and part_n.max() <= local_count:
+        return part_n - 1 + PART_OFFSET[cat_idx]
+    if part_n.min() >= 0 and part_n.max() < local_count:
+        return part_n + PART_OFFSET[cat_idx]
+    return None
 
 
 def find_label_file(pts_path: str):
@@ -249,18 +282,8 @@ def convert_split(raw_dir: str, out_dir: str, split: str, prefix: str):
 
         cat_idx = SYNSET_TO_CAT[synset]
 
-        # Make part labels GLOBAL (0..49) if the raw labels are 1-indexed local
-        local_count = PART_COUNT[cat_idx]
-        if part_n.min() >= 1 and part_n.max() <= local_count:
-            # Local 1-indexed labels — shift to global
-            part_global = part_n - 1 + PART_OFFSET[cat_idx]
-        elif part_n.min() >= 0 and part_n.max() < local_count:
-            # Local 0-indexed labels: shift to global.
-            part_global = part_n + PART_OFFSET[cat_idx]
-        elif part_n.min() >= 0 and part_n.max() <= 49:
-            # Already global
-            part_global = part_n
-        else:
+        part_global = to_global_part_labels(part_n, cat_idx)
+        if part_global is None:
             print(f"  [warn] unexpected label range in {name}: "
                   f"[{part_n.min()},{part_n.max()}], skipping")
             continue
@@ -413,15 +436,9 @@ def convert_shapenet_archive_streaming(archive_path: str, out_dir: str) -> tuple
 
                 xyz_n, part_n = resample(xyz, part, NUM_POINTS_PER_SHAPE)
                 cat_idx = SYNSET_TO_CAT[synset]
-                lc = PART_COUNT[cat_idx]
 
-                if 1 <= int(part_n.min()) and int(part_n.max()) <= lc:
-                    part_g = part_n - 1 + PART_OFFSET[cat_idx]
-                elif 0 <= int(part_n.min()) and int(part_n.max()) < lc:
-                    part_g = part_n + PART_OFFSET[cat_idx]
-                elif 0 <= int(part_n.min()) and int(part_n.max()) <= 49:
-                    part_g = part_n
-                else:
+                part_g = to_global_part_labels(part_n, cat_idx)
+                if part_g is None:
                     n_skip += 1
                     continue
 

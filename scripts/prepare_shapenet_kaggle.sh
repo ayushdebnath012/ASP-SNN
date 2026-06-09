@@ -30,24 +30,19 @@ if ! command -v kaggle &> /dev/null; then
 fi
 
 # Skip if already converted
-if [ -f "${OUT_DIR}/all_object_categories.txt" ]; then
+if [ -f "${OUT_DIR}/all_object_categories.txt" ] \
+   && ls "${OUT_DIR}"/train*.h5 >/dev/null 2>&1 \
+   && ls "${OUT_DIR}"/test*.h5 >/dev/null 2>&1; then
     echo "[Skip] HDF5 already present at ${OUT_DIR}"
     exit 0
 fi
 
-# Download from Kaggle (try multiple known datasets)
-DOWNLOADED=0
-for ds in "mitkir/shapenet" "rkrispin/shapenet-part"; do
-    echo "[Try] kaggle datasets download -d ${ds} -p ${DATA_DIR}"
-    if kaggle datasets download -d "${ds}" -p "${DATA_DIR}" --force 2>/dev/null; then
-        DOWNLOADED=1
-        break
-    fi
-done
-
-if [ ${DOWNLOADED} -eq 0 ]; then
+# Download from Kaggle. The converter requires this raw ShapeNetPart mirror
+# because it includes train_test_split/*.json.
+echo "[Try] kaggle datasets download -d mitkir/shapenet -p ${DATA_DIR}"
+if ! kaggle datasets download -d "mitkir/shapenet" -p "${DATA_DIR}" --force 2>/dev/null; then
     echo "[ERROR] Could not download from Kaggle"
-    echo "  Manually download a ShapeNetPart dataset from kaggle.com"
+    echo "  Manually download https://www.kaggle.com/datasets/mitkir/shapenet"
     echo "  and place the raw extracted folder at:"
     echo "    ${RAW_DIR}"
     exit 1
@@ -62,7 +57,7 @@ done
 
 # Find the raw directory if it has a different name
 if [ ! -d "${RAW_DIR}" ]; then
-    for cand in ${DATA_DIR}/shapenetcore*; do
+    for cand in "${DATA_DIR}"/shapenetcore*; do
         if [ -d "$cand" ]; then
             RAW_DIR="$cand"
             echo "[Found] raw dir: ${RAW_DIR}"
@@ -78,6 +73,17 @@ if [ ! -d "${RAW_DIR}" ]; then
     exit 1
 fi
 
+if [ ! -f "${RAW_DIR}/synsetoffset2category.txt" ] \
+   || [ ! -f "${RAW_DIR}/train_test_split/shuffled_train_file_list.json" ] \
+   || [ ! -f "${RAW_DIR}/train_test_split/shuffled_val_file_list.json" ] \
+   || [ ! -f "${RAW_DIR}/train_test_split/shuffled_test_file_list.json" ]; then
+    echo "[ERROR] Raw directory is incomplete: ${RAW_DIR}"
+    echo "  Expected synsetoffset2category.txt and train_test_split/*.json."
+    echo "  This usually means the wrong Kaggle dataset/archive was downloaded."
+    echo "  Use: kaggle datasets download -d mitkir/shapenet -p ${DATA_DIR} --force"
+    exit 1
+fi
+
 # Convert raw to HDF5
 echo "[Convert] raw -> HDF5 ..."
 python datasets/convert_shapenet_raw.py \
@@ -87,6 +93,10 @@ python datasets/convert_shapenet_raw.py \
 # Verify
 N_TRAIN=$(ls ${OUT_DIR}/train*.h5 2>/dev/null | wc -l)
 N_TEST=$(ls ${OUT_DIR}/test*.h5 2>/dev/null | wc -l)
+if [ "${N_TRAIN}" -eq 0 ] || [ "${N_TEST}" -eq 0 ]; then
+    echo "[ERROR] Conversion finished but no train/test H5 files were written."
+    exit 1
+fi
 echo ""
 echo "========================================"
 echo "  Done!"

@@ -46,8 +46,8 @@ CATEGORY_TO_PARTS = {
     11: [36, 37],              # Mug
     12: [38, 39, 40],          # Pistol
     13: [41, 42, 43],          # Rocket
-    14: [44, 45],              # Skateboard
-    15: [46, 47, 48, 49],      # Table
+    14: [44, 45, 46],          # Skateboard
+    15: [47, 48, 49],          # Table
 }
 
 NUM_PARTS = 50

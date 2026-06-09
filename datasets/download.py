@@ -17,7 +17,9 @@ Usage:
 """
 
 import argparse
+import glob
 import os
+import subprocess
 import sys
 import zipfile
 import tarfile
@@ -34,6 +36,76 @@ SHAPENET_URL = "https://shapenet.cs.stanford.edu/media/shapenet_part_seg_hdf5_da
 # Public Google Drive mirror (used by PointNeXt and others)
 SHAPENET_GDRIVE_ID = "1tEnSGAdgfp-NPVS5y_ALD8eF18bzwhM_"
 SHAPENET_DIR = "shapenet_part_seg_hdf5_data"
+SHAPENET_RAW_DIR = "shapenetcore_partanno_segmentation_benchmark_v0_normal"
+SHAPENET_KAGGLE_SLUG = "mitkir/shapenet"
+
+
+def _shapenet_hdf5_ready(out_dir):
+    return (
+        os.path.exists(os.path.join(out_dir, "all_object_categories.txt"))
+        and glob.glob(os.path.join(out_dir, "train*.h5"))
+        and glob.glob(os.path.join(out_dir, "test*.h5"))
+    )
+
+
+def _shapenet_raw_ready(raw_dir):
+    split_dir = os.path.join(raw_dir, "train_test_split")
+    return (
+        os.path.exists(os.path.join(raw_dir, "synsetoffset2category.txt"))
+        and os.path.exists(os.path.join(split_dir, "shuffled_train_file_list.json"))
+        and os.path.exists(os.path.join(split_dir, "shuffled_val_file_list.json"))
+        and os.path.exists(os.path.join(split_dir, "shuffled_test_file_list.json"))
+    )
+
+
+def _find_shapenet_raw_dir():
+    preferred = os.path.join(DATA_ROOT, SHAPENET_RAW_DIR)
+    if _shapenet_raw_ready(preferred):
+        return preferred
+    for cand in glob.glob(os.path.join(DATA_ROOT, "shapenetcore*")):
+        if os.path.isdir(cand) and _shapenet_raw_ready(cand):
+            return cand
+    return None
+
+
+def _convert_shapenet_raw(raw_dir, out_dir):
+    print(f"[ShapeNet] Converting raw Kaggle data from {raw_dir} ...")
+    subprocess.run([
+        sys.executable,
+        os.path.join("datasets", "convert_shapenet_raw.py"),
+        "--raw_dir", raw_dir,
+        "--out_dir", out_dir,
+    ], check=True)
+    return _shapenet_hdf5_ready(out_dir)
+
+
+def _download_shapenet_from_kaggle(out_dir):
+    print(f"[ShapeNet] Trying Kaggle raw mirror ({SHAPENET_KAGGLE_SLUG}) ...")
+    try:
+        from kaggle.api.kaggle_api_extended import KaggleApi
+    except ImportError:
+        print("[ShapeNet] Kaggle package not installed (pip install kaggle)")
+        return False
+
+    try:
+        api = KaggleApi()
+        api.authenticate()
+        api.dataset_download_files(
+            SHAPENET_KAGGLE_SLUG,
+            path=DATA_ROOT,
+            force=True,
+            quiet=False,
+            unzip=True,
+        )
+    except Exception as e:
+        print(f"[ShapeNet] Kaggle failed: {e}")
+        return False
+
+    raw_dir = _find_shapenet_raw_dir()
+    if raw_dir is None:
+        print("[ShapeNet] Kaggle download finished, but raw split JSONs were not found")
+        return False
+    return _convert_shapenet_raw(raw_dir, out_dir)
 
 
 def download_shapenet():
@@ -42,16 +114,25 @@ def download_shapenet():
     Tries in order:
       1. Stanford direct URL
       2. Google Drive mirror via gdown
-      3. Manual instructions (incl. Kaggle raw + conversion)
+      3. Existing/Kaggle raw ShapeNetPart + conversion
+      4. Manual instructions
     """
     out_dir = os.path.join(DATA_ROOT, SHAPENET_DIR)
-    sentinel = os.path.join(out_dir, "all_object_categories.txt")
 
-    if os.path.exists(sentinel):
+    if _shapenet_hdf5_ready(out_dir):
         print(f"[ShapeNet] Already present at {out_dir}")
         return True
 
     os.makedirs(DATA_ROOT, exist_ok=True)
+
+    raw_dir = _find_shapenet_raw_dir()
+    if raw_dir is not None:
+        try:
+            if _convert_shapenet_raw(raw_dir, out_dir):
+                print(f"[ShapeNet] Done (converted existing raw data)")
+                return True
+        except Exception as e:
+            print(f"[ShapeNet] Existing raw conversion failed: {e}")
 
     # ── Method 1: Stanford direct ──────────────────────────────────────
     print(f"[ShapeNet] Trying Stanford direct ({SHAPENET_URL}) ...")
@@ -62,7 +143,7 @@ def download_shapenet():
         with zipfile.ZipFile(zip_path, 'r') as zf:
             zf.extractall(DATA_ROOT)
         os.remove(zip_path)
-        if os.path.exists(sentinel):
+        if _shapenet_hdf5_ready(out_dir):
             print(f"[ShapeNet] Done (from Stanford)")
             return True
     except Exception as e:
@@ -80,7 +161,7 @@ def download_shapenet():
             with zipfile.ZipFile(zip_path, 'r') as zf:
                 zf.extractall(DATA_ROOT)
             os.remove(zip_path)
-            if os.path.exists(sentinel):
+            if _shapenet_hdf5_ready(out_dir):
                 print(f"[ShapeNet] Done (from gdown mirror)")
                 return True
     except ImportError:
@@ -90,7 +171,15 @@ def download_shapenet():
         if os.path.exists(zip_path):
             os.remove(zip_path)
 
-    # ── Method 3: Manual instructions ──────────────────────────────────
+    # ── Method 3: Kaggle raw mirror + converter ────────────────────────
+    try:
+        if _download_shapenet_from_kaggle(out_dir):
+            print(f"[ShapeNet] Done (from Kaggle raw mirror)")
+            return True
+    except Exception as e:
+        print(f"[ShapeNet] Kaggle conversion failed: {e}")
+
+    # ── Manual instructions ────────────────────────────────────────────
     print()
     print("=" * 60)
     print("  ShapeNetPart auto-download failed from all sources")
@@ -99,9 +188,10 @@ def download_shapenet():
     print("  Option A: Download from Kaggle and convert to HDF5")
     print("    1. Install Kaggle CLI:    pip install kaggle")
     print("    2. Set up API key:        https://www.kaggle.com/docs/api")
-    print("    3. Download (any of these works):")
-    print("       kaggle datasets download -d mitkir/shapenet -p data/")
-    print("    4. Extract the .zip into data/shapenetcore_partanno_*/")
+    print("    3. Download the raw ShapeNetPart mirror:")
+    print("       kaggle datasets download -d mitkir/shapenet -p data/ --unzip")
+    print("    4. Confirm this exists before conversion:")
+    print("       data/shapenetcore_partanno_segmentation_benchmark_v0_normal/train_test_split/")
     print("    5. Convert to HDF5:")
     print("       python datasets/convert_shapenet_raw.py \\")
     print("           --raw_dir data/shapenetcore_partanno_segmentation_benchmark_v0_normal \\")

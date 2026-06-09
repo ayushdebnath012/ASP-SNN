@@ -7,6 +7,12 @@ __pycache__/
 # Large model checkpoints (too big for GitHub)
 a100_ckpts/*.pth
 a100_ckpts/*_latest.pt
+checkpoints/
+logs/
+
+# Generated datasets
+data/shapenet_part_seg_hdf5_data/
+data/shapenetcore_partanno_segmentation_benchmark_v0_normal/
 
 # LaTeX auxiliary files
 *.aux

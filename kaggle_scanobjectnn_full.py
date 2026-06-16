@@ -66,6 +66,17 @@ def _find_proj_root(sentinel="train_scanobj.py"):
         script_dir = os.getcwd()
     if os.path.isfile(os.path.join(script_dir, sentinel)):
         return script_dir
+    # Final fallback: clone from GitHub (no dataset attachment needed)
+    clone_dir = "/kaggle/working/ASP-SNN"
+    if not os.path.isdir(clone_dir):
+        print("Project not in /kaggle/input — cloning from GitHub ...")
+        subprocess.run([
+            "git", "clone", "--depth=1",
+            "--branch", "codex/fix-shapenet-h5-conversion",
+            "https://github.com/AryaPawa/ASP-SNN.git", clone_dir,
+        ], check=True)
+    if os.path.isfile(os.path.join(clone_dir, sentinel)):
+        return clone_dir
     return None
 
 PROJ = None

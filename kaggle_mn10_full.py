@@ -237,6 +237,9 @@ LAM_EXIT     = 0.1
 LAM_FR       = 0.02
 LAM_DIV      = 0.05
 LABEL_SMOOTH = 0.1
+KD_TEMP      = 4.0    # KD softmax temperature
+KD_LAM       = 0.5    # KD loss weight
+TEACHER_EP   = 20     # epochs to pre-train PointNet teacher (small dataset)
 CKPT_DIR     = os.path.join(WORK, "mn10_ckpts")
 os.makedirs(CKPT_DIR, exist_ok=True)
 
@@ -270,7 +273,59 @@ def make_scheduler(opt):
         return 0.01 + 0.99 * 0.5 * (1.0 + math.cos(math.pi * min(p, 1.0)))
     return torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda)
 
-# ── 8. Training helpers ────────────────────────────────────────────────────────
+# ── 8. KD teacher ─────────────────────────────────────────────────────────────
+
+class PointNetTeacher(nn.Module):
+    """PointNet ANN teacher for knowledge distillation."""
+    def __init__(self, num_classes, in_dim=3):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Conv1d(in_dim, 64, 1), nn.BatchNorm1d(64), nn.ReLU(),
+            nn.Conv1d(64, 128, 1), nn.BatchNorm1d(128), nn.ReLU(),
+            nn.Conv1d(128, 1024, 1), nn.BatchNorm1d(1024), nn.ReLU(),
+        )
+        self.fc = nn.Sequential(
+            nn.Linear(1024, 512), nn.BatchNorm1d(512), nn.ReLU(), nn.Dropout(0.3),
+            nn.Linear(512, 256), nn.BatchNorm1d(256), nn.ReLU(), nn.Dropout(0.3),
+            nn.Linear(256, num_classes),
+        )
+    def forward(self, pts):  # pts: [B, N, 3]
+        x = self.mlp(pts[..., :3].permute(0, 2, 1)).max(dim=-1).values
+        return self.fc(x)
+
+def kd_loss_fn(student_logits, teacher_logits, T=4.0):
+    return F.kl_div(
+        F.log_softmax(student_logits / T, dim=-1),
+        F.softmax(teacher_logits.detach() / T, dim=-1),
+        reduction='batchmean',
+    ) * (T * T)
+
+def pretrain_teacher(teacher, loader, epochs):
+    print(f"\n[KD] Pre-training PointNet teacher ({epochs} epochs) ...")
+    teacher.train()
+    opt = torch.optim.AdamW(teacher.parameters(), lr=1e-3, weight_decay=1e-4)
+    sch = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs, eta_min=1e-5)
+    for ep in range(epochs):
+        total_loss = total_acc = n = 0
+        for pts, labels in loader:
+            pts, labels = pts.to(device), labels.to(device)
+            logits = teacher(pts)
+            loss = F.cross_entropy(logits, labels, label_smoothing=0.1)
+            opt.zero_grad(); loss.backward()
+            torch.nn.utils.clip_grad_norm_(teacher.parameters(), 1.0)
+            opt.step()
+            total_loss += loss.item() * pts.size(0)
+            total_acc  += (logits.argmax(1) == labels).sum().item()
+            n          += pts.size(0)
+        sch.step()
+        if (ep + 1) % 5 == 0:
+            print(f"  [Teacher] Ep {ep+1:2d}/{epochs}  "
+                  f"loss={total_loss/n:.4f}  acc={total_acc/n:.4f}")
+    teacher.eval()
+    print("[KD] Teacher ready.")
+    return teacher
+
+# ── 9. Training helpers ────────────────────────────────────────────────────────
 
 def train_spm_epoch(model, loader, optimizer, epoch):
     model.train()
@@ -296,8 +351,10 @@ def train_spm_epoch(model, loader, optimizer, epoch):
     return total_loss / n, total_acc / n
 
 
-def train_asp_epoch(model, loader, optimizer, epoch):
+def train_asp_epoch(model, loader, optimizer, epoch, teacher=None):
     model.train()
+    if teacher is not None:
+        teacher.eval()
     progress = epoch / max(EPOCHS - 1, 1)
     tau = gumbel_tau(epoch)
     if hasattr(model, "set_gumbel_tau"):
@@ -316,6 +373,10 @@ def train_asp_epoch(model, loader, optimizer, epoch):
             geo_descriptors=geo,
             selection_weights=sel_w,
         )
+        if teacher is not None:
+            with torch.no_grad():
+                t_logits = teacher(pts)
+            loss = loss + KD_LAM * kd_loss_fn(logits_final, t_logits, T=KD_TEMP)
         if torch.isfinite(loss):
             optimizer.zero_grad()
             loss.backward()
@@ -419,11 +480,16 @@ for epoch in range(EPOCHS):
 
 print(f"\nSPM Best Val: {best_spm*100:.2f}%")
 
-# ── 11. ASP+SPM (improved) ─────────────────────────────────────────────────────
+# ── 11. Pre-train PointNet teacher ────────────────────────────────────────────
+teacher = PointNetTeacher(NUM_CLASSES, in_dim=3).to(device)
+teacher = pretrain_teacher(teacher, train_loader, TEACHER_EP)
+torch.save(teacher.state_dict(), os.path.join(CKPT_DIR, "teacher.pth"))
+
+# ── 12. ASP+SPM (improved) with KD ────────────────────────────────────────────
 print(f"\n{'='*70}")
-print("Phase 2: ASP+SPM — Improved (GRU belief + Multi-head SSP + Diversity loss)")
+print("Phase 2: ASP+SPM — Improved (GRU belief + Multi-head SSP + Diversity loss + KD)")
 print(f"  d_ssp=128, n_heads=4, diversity=0.1")
-print(f"  LAM_DIV={LAM_DIV}, LAM_EXIT={LAM_EXIT} (progressive), TTA={TTA_VOTES} votes")
+print(f"  KD: lam={KD_LAM}, T={KD_TEMP}  |  LAM_DIV={LAM_DIV}  |  TTA={TTA_VOTES} votes")
 print(f"{'='*70}")
 
 asp = make_asp()
@@ -438,7 +504,7 @@ asp_history = []
 
 for epoch in range(EPOCHS):
     t0 = time.time()
-    tr_loss, tr_acc = train_asp_epoch(asp, train_loader, asp_opt, epoch)
+    tr_loss, tr_acc = train_asp_epoch(asp, train_loader, asp_opt, epoch, teacher=teacher)
     asp_sch.step()
     asp_history.append({"epoch": epoch, "train_acc": tr_acc})
 
@@ -462,7 +528,7 @@ for epoch in range(EPOCHS):
 
 print(f"\nASP Best Val: {best_asp*100:.2f}%")
 
-# ── 12. Final evaluation (best checkpoints, full TTA) ─────────────────────────
+# ── 13. Final evaluation (best checkpoints, full TTA) ─────────────────────────
 print(f"\n{'='*70}")
 print("Final Evaluation — Best Checkpoints + Full TTA")
 print(f"{'='*70}")
@@ -482,7 +548,7 @@ print(f"  ASP  OA: {asp_final*100:.2f}%  "
 print(f"  Δ (ASP - SPM): {(asp_final - spm_final)*100:+.2f} pp")
 print(f"  Est. energy vs ANN: {energy*100:.1f}%  (fr≈0.15, Loihi 2)")
 
-# ── 13. Save results ───────────────────────────────────────────────────────────
+# ── 14. Save results ───────────────────────────────────────────────────────────
 results = {
     "dataset":        "ModelNet10",
     "num_classes":    NUM_CLASSES,

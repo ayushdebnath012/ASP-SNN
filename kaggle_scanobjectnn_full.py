@@ -206,6 +206,9 @@ class Cfg:
     ckpt_dir      = os.path.join(WORK, "scanobj_ckpts")
     exit_threshold = 0.40
     in_channels   = 6
+    kd_temp       = 4.0    # KD softmax temperature
+    kd_lam        = 0.5    # KD loss weight
+    kd_teacher_ep = 30     # epochs to pre-train PointNet teacher
     aug_rotate_z  = True
     aug_scale_lo  = 0.85
     aug_scale_hi  = 1.15
@@ -251,12 +254,68 @@ test_loader  = DataLoader(test_ds,  cfg.batch_size, shuffle=False,
                           num_workers=cfg.num_workers, pin_memory=True,
                           persistent_workers=pw)
 
-# ── 6. Model ───────────────────────────────────────────────────────────────────
+# ── 6. KD teacher ─────────────────────────────────────────────────────────────
+
+class PointNetTeacher(nn.Module):
+    """PointNet ANN teacher for knowledge distillation."""
+    def __init__(self, num_classes, in_dim=3):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Conv1d(in_dim, 64, 1), nn.BatchNorm1d(64), nn.ReLU(),
+            nn.Conv1d(64, 128, 1), nn.BatchNorm1d(128), nn.ReLU(),
+            nn.Conv1d(128, 1024, 1), nn.BatchNorm1d(1024), nn.ReLU(),
+        )
+        self.fc = nn.Sequential(
+            nn.Linear(1024, 512), nn.BatchNorm1d(512), nn.ReLU(), nn.Dropout(0.3),
+            nn.Linear(512, 256), nn.BatchNorm1d(256), nn.ReLU(), nn.Dropout(0.3),
+            nn.Linear(256, num_classes),
+        )
+    def forward(self, pts):  # pts: [B, N, 3]
+        x = self.mlp(pts[..., :3].permute(0, 2, 1)).max(dim=-1).values
+        return self.fc(x)
+
+def kd_loss_fn(student_logits, teacher_logits, T):
+    return F.kl_div(
+        F.log_softmax(student_logits / T, dim=-1),
+        F.softmax(teacher_logits.detach() / T, dim=-1),
+        reduction='batchmean',
+    ) * (T * T)
+
+def pretrain_teacher_scanobj(teacher, loader, epochs):
+    print(f"\n[KD] Pre-training PointNet teacher ({epochs} epochs) ...")
+    teacher.train()
+    opt = torch.optim.AdamW(teacher.parameters(), lr=1e-3, weight_decay=1e-4)
+    sch = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs, eta_min=1e-5)
+    for ep in range(epochs):
+        total_loss = total_acc = n = 0
+        for batch in loader:
+            slices, geo, label = batch[0], batch[1], batch[2]
+            B = label.size(0)
+            # Reconstruct pts by concatenating all slices along the point dim
+            pts = slices.reshape(B, -1, slices.shape[-1])[:, :, :3].to(device)
+            label = label.to(device)
+            logits = teacher(pts)
+            loss = F.cross_entropy(logits, label, label_smoothing=0.1)
+            opt.zero_grad(); loss.backward()
+            torch.nn.utils.clip_grad_norm_(teacher.parameters(), 1.0)
+            opt.step()
+            total_loss += loss.item() * B
+            total_acc  += (logits.argmax(1) == label).sum().item()
+            n          += B
+        sch.step()
+        if (ep + 1) % 10 == 0:
+            print(f"  [Teacher] Ep {ep+1:2d}/{epochs}  "
+                  f"loss={total_loss/n:.4f}  acc={total_acc/n:.4f}")
+    teacher.eval()
+    print("[KD] Teacher ready.")
+    return teacher
+
+# ── 7. Model ───────────────────────────────────────────────────────────────────
 model = ASPClassifier(cfg).to(device)
 n_params = sum(p.numel() for p in model.parameters())
 print(f"ASPClassifier params: {n_params:,}")
 
-# ── 7. Helpers ─────────────────────────────────────────────────────────────────
+# ── 8. Helpers ─────────────────────────────────────────────────────────────────
 def tau_at(epoch):
     return max(cfg.tau_end, cfg.tau_start * (cfg.tau_decay ** epoch))
 
@@ -276,7 +335,7 @@ def cosine_schedule(opt, warmup_ep, total_ep):
         return 0.01 + 0.99 * 0.5 * (1.0 + math.cos(math.pi * min(p, 1.0)))
     return torch.optim.lr_scheduler.LambdaLR(opt, fn)
 
-# ── 8. Optimizer & scheduler ───────────────────────────────────────────────────
+# ── 9. Optimizer & scheduler ───────────────────────────────────────────────────
 optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
 scheduler = cosine_schedule(optimizer, cfg.warmup_epochs, cfg.epochs)
 scaler    = torch.amp.GradScaler(enabled=cfg.use_amp and torch.cuda.is_available())
@@ -290,9 +349,11 @@ if cfg.use_swa:
                       anneal_epochs=max(1, cfg.epochs - swa_start))
     print(f"SWA enabled: starts at epoch {swa_start}, lr → {cfg.swa_lr}")
 
-# ── 9. Train / eval functions ──────────────────────────────────────────────────
-def train_epoch(ep):
+# ── 10. Train / eval functions ─────────────────────────────────────────────────
+def train_epoch(ep, teacher=None):
     model.train()
+    if teacher is not None:
+        teacher.eval()
     tau = tau_at(ep)
     model.gumbel_tau.fill_(tau)
     total_loss = total_acc = n = 0
@@ -310,6 +371,13 @@ def train_epoch(ep):
                 w * F.cross_entropy(l, label, label_smoothing=cfg.label_smooth)
                 for w, l in zip(aw, logits_all)
             )
+            if teacher is not None:
+                B = label.size(0)
+                pts_t = slices.reshape(B, -1, slices.shape[-1])[:, :, :3]
+                with torch.no_grad():
+                    t_logits = teacher(pts_t)
+                final_logits = agg_logits(logits_all, cfg.logit_ensemble)
+                loss = loss + cfg.kd_lam * kd_loss_fn(final_logits, t_logits, cfg.kd_temp)
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
         nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
@@ -343,9 +411,15 @@ def eval_epoch(loader, eval_model=None, n_votes=1):
             total   += 1
     return correct / total
 
-# ── 10. Training loop ──────────────────────────────────────────────────────────
+# ── 11. Pre-train PointNet teacher ────────────────────────────────────────────
+kd_teacher = PointNetTeacher(cfg.num_classes, in_dim=3).to(device)
+kd_teacher = pretrain_teacher_scanobj(kd_teacher, train_loader, cfg.kd_teacher_ep)
+torch.save(kd_teacher.state_dict(), os.path.join(cfg.ckpt_dir, "teacher.pth"))
+
+# ── 12. Training loop ──────────────────────────────────────────────────────────
 print(f"\n{'='*70}")
 print(f"Training ASPClassifier on ScanObjectNN PB-T50-RS — {cfg.epochs} epochs")
+print(f"  KD: lam={cfg.kd_lam}, T={cfg.kd_temp}")
 print(f"{'='*70}")
 
 best_val_acc = 0.0
@@ -354,7 +428,7 @@ history      = []
 
 for ep in range(cfg.epochs):
     t0 = time.time()
-    tr_loss, tr_acc = train_epoch(ep)
+    tr_loss, tr_acc = train_epoch(ep, teacher=kd_teacher)
 
     in_swa = cfg.use_swa and ep >= swa_start
     if in_swa:
@@ -385,7 +459,7 @@ for ep in range(cfg.epochs):
     history.append({"epoch": ep, "train_acc": tr_acc, "val_acc": val_acc,
                     "train_loss": tr_loss})
 
-# ── 11. SWA BN update + final test ────────────────────────────────────────────
+# ── 13. SWA BN update + final test ───────────────────────────────────────────
 if cfg.use_swa:
     print("\nUpdating SWA BatchNorm statistics ...")
     torch.optim.swa_utils.update_bn(train_loader, swa_model, device=device)
@@ -402,7 +476,7 @@ print(f"\nFinal test evaluation (TTA={cfg.n_votes} votes) ...")
 test_acc = eval_epoch(test_loader, n_votes=cfg.n_votes)
 print(f"  Best model test OA: {test_acc*100:.2f}%")
 
-# ── 12. Save results ───────────────────────────────────────────────────────────
+# ── 14. Save results ───────────────────────────────────────────────────────────
 results = {
     "dataset": "ScanObjectNN_PB_T50_RS",
     "num_classes": cfg.num_classes,

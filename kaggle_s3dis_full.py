@@ -329,6 +329,9 @@ cmd = [
     f"use_amp={cfg.use_amp}",
     f"eval_interval={cfg.eval_interval}",
     f"test_area={cfg.test_area}",
+    "kd_teacher_epochs=30",
+    "kd_temp=4.0",
+    "kd_lam=0.5",
 ]
 
 result = subprocess.run(cmd, cwd=PROJ)

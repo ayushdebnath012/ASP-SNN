@@ -42,6 +42,45 @@ for _cat, _parts in CATEGORY_TO_PARTS.items():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  KD teacher (PointNet-style per-point segmentation)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class PointNetSegTeacher(nn.Module):
+    """Lightweight PointNet segmentation teacher for knowledge distillation."""
+    def __init__(self, num_classes: int, in_channels: int = 6):
+        super().__init__()
+        self.local_mlp = nn.Sequential(
+            nn.Conv1d(in_channels, 64, 1), nn.BatchNorm1d(64), nn.ReLU(),
+            nn.Conv1d(64, 128, 1), nn.BatchNorm1d(128), nn.ReLU(),
+        )
+        self.global_mlp = nn.Sequential(
+            nn.Conv1d(128, 1024, 1), nn.BatchNorm1d(1024), nn.ReLU(),
+        )
+        self.seg_head = nn.Sequential(
+            nn.Conv1d(1024 + 128, 512, 1), nn.BatchNorm1d(512), nn.ReLU(),
+            nn.Conv1d(512, 256, 1), nn.BatchNorm1d(256), nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Conv1d(256, num_classes, 1),
+        )
+
+    def forward(self, pts_feat):  # [B, N, C]
+        x = pts_feat.permute(0, 2, 1)   # [B, C, N]
+        local_feat = self.local_mlp(x)  # [B, 128, N]
+        global_feat = self.global_mlp(local_feat).max(dim=-1, keepdim=True).values  # [B, 1024, 1]
+        global_feat = global_feat.expand(-1, -1, local_feat.size(-1))  # [B, 1024, N]
+        combined = torch.cat([local_feat, global_feat], dim=1)  # [B, 1152, N]
+        return self.seg_head(combined).permute(0, 2, 1)  # [B, N, num_classes]
+
+
+def seg_kd_loss(student_logits, teacher_logits, T: float = 4.0) -> torch.Tensor:
+    """Per-point KL divergence loss for segmentation KD."""
+    B, N, C = student_logits.shape
+    s = F.log_softmax(student_logits.reshape(B * N, C) / T, dim=-1)
+    t = F.softmax(teacher_logits.detach().reshape(B * N, C) / T, dim=-1)
+    return F.kl_div(s, t, reduction="batchmean") * (T * T)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  GPU helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -394,6 +433,39 @@ def main():
         prefetch_factor=prefetch,
     )
 
+    # ── KD teacher (optional) ─────────────────────────────────────────────────
+    kd_teacher_epochs = int(getattr(cfg, "kd_teacher_epochs", 0))
+    kd_temp = float(getattr(cfg, "kd_temp", 4.0))
+    kd_lam  = float(getattr(cfg, "kd_lam", 0.5))
+    kd_teacher = None
+    if kd_teacher_epochs > 0:
+        print(f"\n[KD] Pre-training PointNet seg teacher ({kd_teacher_epochs} ep, T={kd_temp}, λ={kd_lam})")
+        kd_teacher = PointNetSegTeacher(NUM_PARTS, in_channels=6).to(device)
+        kd_teacher.train()
+        t_opt = torch.optim.AdamW(kd_teacher.parameters(), lr=1e-3, weight_decay=1e-4)
+        t_sch = torch.optim.lr_scheduler.CosineAnnealingLR(t_opt, T_max=kd_teacher_epochs, eta_min=1e-5)
+        for t_ep in range(kd_teacher_epochs):
+            t_loss_sum = t_n = 0
+            for batch in train_loader:
+                slices_b, geo_b, pts_feat_b, sid_b, labels_b, cat_b = batch
+                pts_feat_b = pts_feat_b.to(device, non_blocking=True)
+                labels_b   = labels_b.to(device, non_blocking=True)
+                cat_b      = cat_b.to(device, non_blocking=True)
+                t_logits = kd_teacher(pts_feat_b)  # [B, N, 50]
+                t_loss = seg_loss_fn(t_logits, labels_b, cat_b)
+                t_opt.zero_grad(); t_loss.backward()
+                nn.utils.clip_grad_norm_(kd_teacher.parameters(), 1.0)
+                t_opt.step()
+                t_loss_sum += float(t_loss.detach()) * pts_feat_b.size(0)
+                t_n        += pts_feat_b.size(0)
+            t_sch.step()
+            if (t_ep + 1) % 10 == 0:
+                print(f"  [Teacher] Ep {t_ep+1:2d}/{kd_teacher_epochs}  loss={t_loss_sum/t_n:.4f}")
+        kd_teacher.eval()
+        teacher_ckpt = os.path.join(cfg.ckpt_dir, "shapenet_teacher.pth")
+        torch.save(kd_teacher.state_dict(), teacher_ckpt)
+        print(f"[KD] Teacher saved → {teacher_ckpt}")
+
     # ── Model ─────────────────────────────────────────────────────────────────
     cfg.num_classes = NUM_PARTS
     cfg.num_categories = NUM_CATEGORIES
@@ -530,6 +602,10 @@ def main():
                     slices, geo, sid_arr, cat_ids, pts_feat, training=True
                 )
                 loss = seg_loss_fn(logits, labels, cat_ids)
+                if kd_teacher is not None:
+                    with torch.no_grad():
+                        t_logits = kd_teacher(pts_feat)
+                    loss = loss + kd_lam * seg_kd_loss(logits, t_logits, kd_temp)
 
             total_loss += float(loss.detach())
             # Scale loss for gradient accumulation before backward

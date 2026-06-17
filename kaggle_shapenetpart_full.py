@@ -310,6 +310,9 @@ cmd = [
     f"eval_interval={cfg.eval_interval}",
     f"checkpoint_interval={cfg.checkpoint_interval}",
     f"early_stopping_patience={cfg.early_stopping_patience}",
+    "kd_teacher_epochs=30",
+    "kd_temp=4.0",
+    "kd_lam=0.5",
 ]
 
 result = subprocess.run(cmd, cwd=PROJ)

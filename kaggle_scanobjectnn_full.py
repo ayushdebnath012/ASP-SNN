@@ -448,13 +448,12 @@ for ep in range(cfg.epochs):
         star = "★" if val_acc == best_val_acc else " "
         lr_now = optimizer.param_groups[0]["lr"]
         swa_tag = " [SWA]" if in_swa else ""
-        print(f"Ep {ep+1:3d}/{cfg.epochs} | TrainAcc={tr_acc:.4f} "
-              f"| ValAcc={val_acc:.4f} {star}"
+        print(f"Ep {ep+1:3d}/{cfg.epochs} | OA={val_acc:.4f} {star}"
               f" | LR={lr_now:.5f}{swa_tag} | {time.time()-t0:.0f}s")
     else:
         lr_now = optimizer.param_groups[0]["lr"]
-        print(f"Ep {ep+1:3d}/{cfg.epochs} | TrainAcc={tr_acc:.4f} "
-              f"| LR={lr_now:.5f} | {time.time()-t0:.0f}s")
+        print(f"Ep {ep+1:3d}/{cfg.epochs} | train={tr_acc:.4f}"
+              f" | LR={lr_now:.5f} | {time.time()-t0:.0f}s")
 
     history.append({"epoch": ep, "train_acc": tr_acc, "val_acc": val_acc,
                     "train_loss": tr_loss})

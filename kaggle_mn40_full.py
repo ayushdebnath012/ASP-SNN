@@ -453,8 +453,8 @@ for epoch in range(EPOCHS):
     asp_sch.step()
     asp_history.append({"epoch": epoch, "train_acc": tr_acc})
 
-    if (epoch + 1) % 10 == 0 or epoch == EPOCHS - 1:
-        # Full TTA only at end; quick eval during training
+    lr_now = asp_opt.param_groups[0]["lr"]
+    if (epoch + 1) % 5 == 0 or epoch == EPOCHS - 1:
         tta = TTA_VOTES if (epoch == EPOCHS - 1 or (epoch + 1) % 50 == 0) else 1
         val_acc, val_slices = eval_asp(asp, val_loader, tta=tta)
         if val_acc > best_asp:
@@ -462,17 +462,14 @@ for epoch in range(EPOCHS):
             best_asp_slices = val_slices
             torch.save(asp.state_dict(), os.path.join(CKPT_DIR, "asp_best.pth"))
         asp_history[-1]["val_acc"] = val_acc
-        elapsed = time.time() - t0
-        lr_now = asp_opt.param_groups[0]["lr"]
         tta_str = f" TTA={tta}" if tta > 1 else ""
-        print(f"[ASP] Ep {epoch+1:3d}/{EPOCHS} | TrainAcc={tr_acc:.4f} "
-              f"| ValAcc={val_acc:.4f} {'★' if val_acc == best_asp else ' '}"
+        star = "★" if val_acc == best_asp else " "
+        print(f"[ASP] Ep {epoch+1:3d}/{EPOCHS} | OA={val_acc:.4f} {star}"
               f" | Slices={val_slices:.2f}/{T}{tta_str}"
-              f" | LR={lr_now:.5f} | {elapsed:.0f}s")
-    elif (epoch + 1) % 2 == 0:
-        lr_now = asp_opt.param_groups[0]["lr"]
-        print(f"[ASP] Ep {epoch+1:3d}/{EPOCHS} | TrainAcc={tr_acc:.4f} "
-              f"| LR={lr_now:.5f} | {time.time()-t0:.0f}s")
+              f" | LR={lr_now:.5f} | {time.time()-t0:.0f}s")
+    else:
+        print(f"[ASP] Ep {epoch+1:3d}/{EPOCHS} | train={tr_acc:.4f}"
+              f" | LR={lr_now:.5f} | {time.time()-t0:.0f}s")
 
 print(f"\nASP Best Val: {best_asp*100:.2f}% (TTA={TTA_VOTES})")
 

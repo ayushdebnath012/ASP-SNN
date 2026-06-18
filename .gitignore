@@ -5,25 +5,8 @@ checkpoints/
 logs/
 data/
 cache/
-outputs/
-results/
-report_output/
-a100_ckpts/
-MN40 results-*/
-results_on_*/
-shapenet_train_plus_val_*_checkpoints_logs/
 *.tar.gz
 *.zip
-*.pt
-*.pth
-*.pdf
-*.aux
-*.log
-*.out
-*.toc
-*.fls
-*.fdb_latexmk
-*.synctex.gz
 .DS_Store
 *.egg-info/
 dist/

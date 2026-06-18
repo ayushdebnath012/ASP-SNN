@@ -20,7 +20,7 @@ separate GPUs via SLURM.
 The foveated transformer extension is available on `main`.
 
 ```bash
-git clone https://github.com/ayush31010/ASP-SNN.git
+git clone https://github.com/AryaPawa/ASP-SNN.git
 cd ASP-SNN
 ```
 
@@ -135,7 +135,7 @@ training must be checked on the target GPU machine after datasets are present.
 Run every command in this section from the repository root folder:
 
 ```bash
-git clone https://github.com/ayush31010/ASP-SNN.git
+git clone https://github.com/AryaPawa/ASP-SNN.git
 cd ASP-SNN
 ```
 
@@ -473,7 +473,7 @@ ASP-SNN/
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/ayush31010/ASP-SNN.git
+git clone https://github.com/AryaPawa/ASP-SNN.git
 cd ASP-SNN
 
 # 2. Create conda environment and install all dependencies

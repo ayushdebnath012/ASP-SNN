@@ -17,8 +17,9 @@ REQUIRED = [
     "configs/scanobj_cls.yaml",
     "configs/shapenet_seg.yaml",
     "configs/s3dis_seg.yaml",
-    "experiments/kaggle/spikegat/modelnet10.py",
-    "experiments/kaggle/spikegat/modelnet40.py",
+    "experiments/full/train_spikegat_modelnet10.py",
+    "experiments/full/train_spikegat_modelnet40.py",
+    "experiments/full/train_asp_modelnet_a100.py",
     "tasks/train_scanobjectnn.py",
     "tasks/train_shapenetpart.py",
     "tasks/train_s3dis.py",
@@ -28,6 +29,9 @@ FORBIDDEN_SUFFIXES = {".pt", ".pth", ".ckpt", ".pdf", ".h5", ".hdf5"}
 STALE_TEXT = (
     "github.com/" + "AryaPawa/ASP-SNN",
     "codex/" + "fix-shapenet-h5-conversion",
+    "experiments/" + "kaggle",
+    "ON_" + "KAGGLE",
+    "/kaggle/" + "working",
 )
 
 

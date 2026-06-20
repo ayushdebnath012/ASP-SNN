@@ -1,5 +1,5 @@
 """
-colab_spikegat_mn10_v1.py  —  SpikeGAT on ModelNet10, targeting > 94.93% OA
+Full SpikeGAT training on ModelNet10, targeting > 94.93% single-pass OA
 ===========================================================================
 Novel architecture: Max-First Spiking Graph Attention Network (SpikeGAT)
 
@@ -21,24 +21,14 @@ Accuracy strategy:
   + the paper's canonical scaling/translation augmentation
   + fair single-pass OA for checkpointing, plus separately labelled scale TTA
 
-Run: !python colab_spikegat_mn10_v1.py   (Colab / Kaggle GPU notebook)
+Run: MODELNET10_DIR=/data/ModelNet10 python experiments/full/train_spikegat_modelnet10.py
 """
 
 # ── 0. Imports + env ─────────────────────────────────────────────────────────
-import os, sys, json, math, random, time, warnings, shutil, glob as _glob, subprocess
+import os, json, math, random, time, warnings
 warnings.filterwarnings("ignore")
 
-ON_KAGGLE = os.path.isdir("/kaggle/working")
-ON_COLAB = not ON_KAGGLE and os.path.isdir("/content")
-ENV_NAME = "Kaggle" if ON_KAGGLE else ("Colab" if ON_COLAB else "Cluster/local")
-print("Environment:", ENV_NAME)
-
-AUTO_INSTALL = os.environ.get(
-    "ASP_SNN_AUTO_INSTALL", "1" if (ON_KAGGLE or ON_COLAB) else "0"
-) == "1"
-if AUTO_INSTALL:
-    for pkg in ["trimesh", "kagglehub"]:
-        subprocess.run([sys.executable, "-m", "pip", "install", "-q", pkg], check=True)
+print("Environment: full training")
 
 import numpy as np
 import torch, torch.nn as nn, torch.nn.functional as F
@@ -54,16 +44,7 @@ if DEVICE == "cuda":
 else:
     print("WARNING: no GPU found — will be very slow")
 
-# ── 1. Drive mount ────────────────────────────────────────────────────────────
-if ON_COLAB:
-    try:
-        from google.colab import drive
-        drive.mount("/content/drive", force_remount=False)
-        print("[Drive] mounted")
-    except Exception as e:
-        print(f"[Drive] {e}")
-
-# ── 2. Config ─────────────────────────────────────────────────────────────────
+# ── 1. Config ─────────────────────────────────────────────────────────────────
 K           = 20
 APTEC_T     = 4
 APTEC_DEC   = 1.0
@@ -88,7 +69,7 @@ KD_ALPHA       = 0.35
 
 # Eval
 VAL_EVERY   = 5
-NUM_WORKERS = int(os.environ.get("NUM_WORKERS", "4" if ON_KAGGLE else "2"))
+NUM_WORKERS = int(os.environ.get("NUM_WORKERS", "4"))
 TTA_SCALES  = (1.0, 0.90, 1.10, 0.95, 1.05)
 
 
@@ -109,23 +90,12 @@ def seed_worker(worker_id):
 
 seed_everything(SEED)
 
-# Paths
-if ON_KAGGLE:
-    CKPT_DIR   = "/kaggle/working/spikegat_mn10_v2_ckpts"
-    MN10_INPUT = "/kaggle/input/modelnet10-princeton-3d-object-dataset"
-    MN10_WORK  = "/kaggle/working/ModelNet10"
-    MN10_DIR   = MN10_INPUT
-elif ON_COLAB:
-    CKPT_DIR = "/content/drive/MyDrive/spikegat_mn10_v2_ckpts"
-    MN10_DIR = "/content/ModelNet10"
-else:
-    REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-    CKPT_DIR = os.environ.get(
-        "SPIKEGAT_CKPT_DIR", os.path.join(REPO_ROOT, "outputs", "spikegat_mn10")
-    )
-    MN10_DIR = os.environ.get(
-        "MODELNET10_DIR", os.path.join(REPO_ROOT, "data", "ModelNet10")
-    )
+# Explicit full-run paths. Datasets are never downloaded by a training job.
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+CKPT_DIR = os.environ.get(
+    "SPIKEGAT_CKPT_DIR", os.path.join(REPO_ROOT, "outputs", "spikegat_mn10")
+)
+MN10_DIR = os.environ.get("MODELNET10_DIR", "")
 
 os.makedirs(CKPT_DIR, exist_ok=True)
 T_LATEST = os.path.join(CKPT_DIR, "teacher_latest.pt")
@@ -137,53 +107,12 @@ print(f"\nConfig: k={K} T={APTEC_T} ep={EPOCHS} batch={BATCH} "
       f"lr={LR_SGD}→{LR_MIN} kd_temp={KD_TEMP} seed={SEED}")
 print(f"Ckpts: {CKPT_DIR}")
 
-# ── 3. Download / locate ModelNet10 ──────────────────────────────────────────
-import kagglehub
-MN10_SLUG = "balraj98/modelnet10-princeton-3d-object-dataset"
-
-
-def _find_mn10(base):
-    for cand in [os.path.join(base, "ModelNet10"), base]:
-        if os.path.isdir(cand):
-            subs = [d for d in os.listdir(cand)
-                    if os.path.isdir(os.path.join(cand, d))]
-            if len(subs) >= 8:
-                return cand
-    return None
-
-
-def _download_mn10(dest):
-    print("Downloading ModelNet10 via kagglehub …")
-    p = kagglehub.dataset_download(MN10_SLUG)
-    found = _find_mn10(p)
-    if found and found != dest:
-        shutil.copytree(found, dest, dirs_exist_ok=True)
-    elif not found:
-        zips = _glob.glob(os.path.join(p, "*.zip"))
-        if zips:
-            os.system(f'unzip -q "{zips[0]}" -d "{os.path.dirname(dest)}"')
-        else:
-            raise RuntimeError(f"ModelNet10 not found in {p}")
-    print("Done.")
-
-
-if ON_KAGGLE:
-    pre = _find_mn10(MN10_INPUT)
-    if pre:
-        MN10_DIR = pre
-        print(f"[Kaggle] MN10 at {MN10_DIR}")
-    else:
-        pre2 = _find_mn10(MN10_WORK)
-        if pre2:
-            MN10_DIR = pre2
-        else:
-            MN10_DIR = MN10_WORK
-            _download_mn10(MN10_DIR)
-else:
-    if not os.path.isdir(MN10_DIR):
-        _download_mn10(MN10_DIR)
-    else:
-        print(f"MN10 present at {MN10_DIR}")
+# ── 2. Validate ModelNet10 ────────────────────────────────────────────────────
+if not MN10_DIR or not os.path.isdir(MN10_DIR):
+    raise RuntimeError(
+        "Set MODELNET10_DIR to a prepared ModelNet10 root containing class/train/test folders."
+    )
+print(f"ModelNet10: {MN10_DIR}")
 
 n_cls = len([d for d in os.listdir(MN10_DIR)
              if os.path.isdir(os.path.join(MN10_DIR, d))])

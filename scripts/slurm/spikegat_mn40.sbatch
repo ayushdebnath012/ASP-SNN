@@ -18,7 +18,6 @@ OUTPUT_ROOT="${ASP_SNN_OUTPUT_ROOT:-$ROOT/outputs}"
 export SPIKEGAT_CKPT_DIR="${SPIKEGAT_CKPT_DIR:-$OUTPUT_ROOT/spikegat_mn40}"
 export BATCH_SIZE="${BATCH_SIZE:-32}"
 export NUM_WORKERS="${NUM_WORKERS:-4}"
-export ASP_SNN_AUTO_INSTALL=0
 mkdir -p "$SPIKEGAT_CKPT_DIR"
 
-srun python -u experiments/kaggle/spikegat/modelnet40.py
+srun python -u experiments/full/train_spikegat_modelnet40.py

@@ -1,8 +1,9 @@
 # ASP-SNN
 
-Clean training repository for active and graph-based spiking neural networks on
-3D point clouds. It contains reusable ASP-SNN components, dataset-specific
-training tasks, self-contained Kaggle runners, and SLURM launchers.
+Clean full-training repository for active and graph-based spiking neural
+networks on 3D point clouds. It contains reusable ASP-SNN components,
+dataset-specific training tasks, full experiment entrypoints, and SLURM
+launchers.
 
 The repository intentionally excludes datasets, checkpoints, generated plots,
 paper PDFs, and reviewer supplementary material.
@@ -11,11 +12,7 @@ paper PDFs, and reviewer supplementary material.
 
 | Folder | Purpose |
 |---|---|
-| `experiments/kaggle/spikegat/` | Updated Max-First SpikeGAT ModelNet10/40 runs |
-| `experiments/kaggle/asp/` | Self-contained ASP ModelNet10/40 runs |
-| `experiments/kaggle/dgcnn/` | Spiking DGCNN comparison runs |
-| `experiments/cluster/` | A100/H100-oriented ModelNet training |
-| `experiments/standalone/` | Download-and-run ScanObjectNN, ShapeNetPart, and S3DIS jobs |
+| `experiments/full/` | Updated full ModelNet10/40 SpikeGAT and ASP training |
 | `tasks/` | Config-driven reusable training and evaluation entrypoints |
 | `models/`, `training/`, `datasets/`, `data/` | Shared implementation |
 | `scripts/slurm/` | One-GPU cluster jobs with resumable output paths |
@@ -44,11 +41,14 @@ python tools/validate_repo.py --imports
 
 ## Run the updated SpikeGAT training
 
-Kaggle T4:
+Direct full run:
 
 ```bash
-python experiments/kaggle/spikegat/modelnet40.py
-python experiments/kaggle/spikegat/modelnet10.py
+MODELNET40_DIR=/path/to/ModelNet40 \
+  python experiments/full/train_spikegat_modelnet40.py
+
+MODELNET10_DIR=/path/to/ModelNet10 \
+  python experiments/full/train_spikegat_modelnet10.py
 ```
 
 SLURM/HPC:
@@ -59,7 +59,7 @@ export SPIKEGAT_CKPT_DIR=$SCRATCH/asp-snn/spikegat_mn40
 sbatch scripts/slurm/spikegat_mn40.sbatch
 ```
 
-The ModelNet40 T4 profile uses cached teacher logits and mixed-precision KNN.
+The ModelNet40 full run uses cached teacher logits and mixed-precision KNN.
 Rerunning the same command resumes from `teacher_latest.pt` or
 `spikegat_mn40_latest.pt` in the checkpoint directory.
 
@@ -85,7 +85,6 @@ python -m tasks.train_scanobjectnn \
 ## Documentation
 
 - [Cluster and SLURM guide](docs/CLUSTER.md)
-- [Kaggle guide](docs/KAGGLE.md)
 - [Experiment and metric guide](docs/EXPERIMENTS.md)
 
 ## Result integrity

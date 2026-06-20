@@ -58,7 +58,7 @@ source .venv/bin/activate
 export MODELNET40_DIR=/shared/datasets/ModelNet40
 export SPIKEGAT_CKPT_DIR=$SCRATCH/asp-snn/spikegat_mn40
 export BATCH_SIZE=32 NUM_WORKERS=4
-python -u experiments/kaggle/spikegat/modelnet40.py
+python -u experiments/full/train_spikegat_modelnet40.py
 ```
 
 Rerunning the command resumes automatically from the latest complete

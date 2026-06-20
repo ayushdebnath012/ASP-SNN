@@ -1,8 +1,8 @@
 """
-train_a100.py — SPM + ASP + KD on A100 PCIE
-Run: python train_a100.py [--datasets ModelNet10,ModelNet40] [--epochs 300]
+Full SPM + ASP + KD training on A100/H100
+Run: python experiments/full/train_asp_modelnet_a100.py --modelnet10_dir ... --modelnet40_dir ...
 
-A100-specific tuning vs T4 notebook:
+A100-specific tuning:
   - batch 64, grad_accum 1 (effective batch stays 64; removes accum overhead)
   - num_workers 8
   - BF16 autocast  (A100 has native BF16 tensor cores)
@@ -11,26 +11,11 @@ A100-specific tuning vs T4 notebook:
   - No Drive sync — checkpoints go to ./a100_ckpts/
 """
 
-import argparse, json, math, os, random, shutil, sys, time
+import argparse, json, math, os, random, time
 import warnings
 warnings.filterwarnings("ignore")
 
-# ── auto-install missing deps ─────────────────────────────────────────────────
-def _install(*pkgs):
-    import subprocess
-    subprocess.run([sys.executable, "-m", "pip", "install", "-q", *pkgs], check=True)
-
-try:
-    import trimesh
-except ImportError:
-    _install("trimesh")
-    import trimesh
-
-try:
-    import kagglehub
-except ImportError:
-    _install("kagglehub")
-    import kagglehub
+import trimesh
 
 import numpy as np
 import torch
@@ -61,7 +46,8 @@ parser.add_argument("--teacher_epochs",type=int,   default=150)
 parser.add_argument("--vote",          type=int,   default=5)
 parser.add_argument("--exit_thr",      type=float, default=0.45)
 parser.add_argument("--ckpt_dir",      default="./a100_ckpts")
-parser.add_argument("--data_dir",      default="./data")
+parser.add_argument("--modelnet10_dir", default=os.environ.get("MODELNET10_DIR"))
+parser.add_argument("--modelnet40_dir", default=os.environ.get("MODELNET40_DIR"))
 parser.add_argument("--no_kd",         action="store_true")
 parser.add_argument("--no_compile",    action="store_true")
 parser.add_argument("--no_bf16",       action="store_true")
@@ -107,11 +93,9 @@ USE_COMPILE   = not args.no_compile
 NUM_WORKERS   = 8
 DATASET_NAMES = [d.strip() for d in args.datasets.split(",")]
 CKPT_DIR      = args.ckpt_dir
-DATA_DIR      = args.data_dir
 RESUME        = args.resume
 
 os.makedirs(CKPT_DIR, exist_ok=True)
-os.makedirs(DATA_DIR, exist_ok=True)
 
 assert NUM_GROUP % ASP_STEPS == 0
 
@@ -120,34 +104,12 @@ print(f"  datasets={DATASET_NAMES}  epochs={EPOCHS}  batch={BATCH}")
 print(f"  dim={TRANS_DIM}  depth={DEPTH}  timestep={TIMESTEP}")
 print(f"  groups={NUM_GROUP}  group_size={GROUP_SIZE}  expand={EXPAND}")
 print(f"  asp_steps={ASP_STEPS}  kd={USE_KD}  kd_temp={KD_TEMP}")
-print(f"  ckpt={CKPT_DIR}  data={DATA_DIR}")
+print(f"  ckpt={CKPT_DIR}")
 
 AMP_CTX = lambda: torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=USE_BF16)
 scaler  = torch.amp.GradScaler("cuda", enabled=(not USE_BF16))   # BF16 doesn't need scaler
 
 # ── Dataset ───────────────────────────────────────────────────────────────────
-def _download(name, slug):
-    folder = os.path.join(DATA_DIR, name)
-    if os.path.isdir(folder) and len(os.listdir(folder)) > 0:
-        print(f"  {name}: cached at {folder}")
-        return folder
-    if os.path.isdir(folder):
-        shutil.rmtree(folder)
-    print(f"  Downloading {name} ...")
-    path = kagglehub.dataset_download(slug)
-    for root, dirs, _files in os.walk(path):
-        if name in dirs:
-            shutil.copytree(os.path.join(root, name), folder)
-            print(f"  {name} -> {folder}")
-            return folder
-        subdirs_with_train = [d for d in dirs if os.path.isdir(os.path.join(root, d, "train"))]
-        if len(subdirs_with_train) >= 5:
-            shutil.copytree(root, folder)
-            print(f"  {name} -> {folder}")
-            return folder
-    return path
-
-
 def _augment(pts):
     n = pts.shape[0]
     keep = max(int(n * random.uniform(0.875, 1.0)), 1)
@@ -941,18 +903,21 @@ def eval_asp(model, loader):
     return correct / total, slices / total
 
 
-# ── Dataset config / download ─────────────────────────────────────────────────
-SLUGS = {
-    "ModelNet10": "balraj98/modelnet10-princeton-3d-object-dataset",
-    "ModelNet40": "balraj98/modelnet40-princeton-3d-object-dataset",
-}
-
 def dataset_config():
+    roots = {
+        "ModelNet10": args.modelnet10_dir,
+        "ModelNet40": args.modelnet40_dir,
+    }
     cfg = {}
     for name in DATASET_NAMES:
+        if name not in roots:
+            raise ValueError(f"Unsupported dataset: {name}")
+        root = roots[name]
+        if not root or not os.path.isdir(root):
+            flag = "--modelnet10_dir" if name == "ModelNet10" else "--modelnet40_dir"
+            raise RuntimeError(f"Set {flag} to a prepared {name} root.")
         classes = 10 if "10" in name else 40
-        print(f"\n[Download] {name} ...")
-        root = _download(name, SLUGS[name])
+        print(f"\n[Dataset] {name}: {root}")
         cfg[name] = {"root": root, "classes": classes}
     return cfg
 

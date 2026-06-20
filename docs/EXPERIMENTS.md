@@ -1,32 +1,30 @@
-# Experiments and metrics
+# Full experiments and metrics
 
 ## ModelNet classification
 
 | Runner | Dataset | Primary output |
 |---|---|---|
-| `experiments/kaggle/spikegat/modelnet10.py` | ModelNet10 | `final_metrics.json` |
-| `experiments/kaggle/spikegat/modelnet40.py` | ModelNet40 | `final_metrics.json` |
-| `experiments/kaggle/dgcnn/modelnet*.py` | ModelNet10/40 | baseline checkpoints/history |
-| `experiments/kaggle/asp/modelnet*.py` | ModelNet10/40 | ASP checkpoints/history |
-| `experiments/cluster/train_modelnet_a100.py` | ModelNet10/40 | aggregate results/history |
+| `experiments/full/train_spikegat_modelnet10.py` | ModelNet10 | `final_metrics.json` |
+| `experiments/full/train_spikegat_modelnet40.py` | ModelNet40 | `final_metrics.json` |
+| `experiments/full/train_asp_modelnet_a100.py` | ModelNet10/40 | aggregate results/history |
 
-The updated SpikeGAT code preserves Max-First graph aggregation, uses the
-supplementary MPR/APTEC equations, initializes attention as identity, transfers
-ANN teacher weights, and separates single-pass OA from scale-TTA OA.
+The SpikeGAT code preserves Max-First graph aggregation, uses the supplementary
+MPR/APTEC equations, initializes attention as identity, transfers ANN teacher
+weights, and separates single-pass OA from scale-TTA OA.
 
 ModelNet40 additionally caches one canonical teacher distribution per training
 shape, avoiding a second dynamic-graph forward pass during every student batch.
 
+Training jobs require prepared datasets and explicit paths. They do not mount
+cloud drives, install packages, or download data at runtime.
+
 ## Other point-cloud tasks
 
-| Task | Config-driven command | Standalone command |
-|---|---|---|
-| ScanObjectNN | `python -m tasks.train_scanobjectnn --config configs/scanobj_cls.yaml` | `python experiments/standalone/scanobjectnn.py` |
-| ShapeNetPart | `python -m tasks.train_shapenetpart --config configs/shapenet_seg.yaml` | `python experiments/standalone/shapenetpart.py` |
-| S3DIS | `python -m tasks.train_s3dis --config configs/s3dis_seg.yaml` | `python experiments/standalone/s3dis.py` |
-
-Use config-driven jobs when data already exists on a cluster. Standalone jobs
-are useful on Kaggle or a fresh node because they locate or download data.
+| Task | Full training command |
+|---|---|
+| ScanObjectNN | `python -m tasks.train_scanobjectnn --config configs/scanobj_cls.yaml` |
+| ShapeNetPart | `python -m tasks.train_shapenetpart --config configs/shapenet_seg.yaml` |
+| S3DIS | `python -m tasks.train_s3dis --config configs/s3dis_seg.yaml` |
 
 ## Fair comparison checklist
 

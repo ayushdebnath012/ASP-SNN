@@ -14,11 +14,14 @@ cd "$ROOT"
 source "${ASP_SNN_VENV:-$ROOT/.venv}/bin/activate"
 
 OUTPUT_ROOT="${ASP_SNN_OUTPUT_ROOT:-$ROOT/outputs}"
-mkdir -p "$OUTPUT_ROOT/modelnet_a100" "$OUTPUT_ROOT/data"
+mkdir -p "$OUTPUT_ROOT/modelnet_a100"
+: "${MODELNET10_DIR:?Set MODELNET10_DIR before sbatch}"
+: "${MODELNET40_DIR:?Set MODELNET40_DIR before sbatch}"
 
-srun python -u experiments/cluster/train_modelnet_a100.py \
+srun python -u experiments/full/train_asp_modelnet_a100.py \
   --datasets "${DATASETS:-ModelNet10,ModelNet40}" \
   --epochs "${EPOCHS:-300}" \
   --batch "${BATCH_SIZE:-64}" \
   --ckpt_dir "$OUTPUT_ROOT/modelnet_a100" \
-  --data_dir "${MODELNET_DATA_ROOT:-$OUTPUT_ROOT/data}"
+  --modelnet10_dir "$MODELNET10_DIR" \
+  --modelnet40_dir "$MODELNET40_DIR"

@@ -64,16 +64,16 @@ TARGET_OA   = 0.9238
 SEED        = 42
 
 # T4 transfer-learning schedule. The final protocol remains 1,024 points/k=20.
-EPOCHS       = int(os.environ.get("EPOCHS", "180"))
+EPOCHS       = int(os.environ.get("EPOCHS", "250"))
 BATCH        = int(os.environ.get("BATCH_SIZE", "32"))
-LR_SGD       = 0.05
+LR_SGD       = 0.1
 LR_MIN       = 0.001
 MOMENTUM     = 0.9
 WD_SGD       = 1e-5
-LABEL_SMOOTH = 0.2
+LABEL_SMOOTH = 0.1
 
 # Knowledge distillation
-TEACHER_EPOCHS = int(os.environ.get("TEACHER_EPOCHS", "150"))
+TEACHER_EPOCHS = int(os.environ.get("TEACHER_EPOCHS", "200"))
 KD_TEMP        = 4.0
 KD_ALPHA       = 0.35  # keep the supervised objective dominant
 CACHE_TEACHER_LOGITS = True
